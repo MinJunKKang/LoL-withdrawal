@@ -12,13 +12,17 @@ from utils.stats import (
 )
 
 CURRENCY = "Point"
+COOLDOWN_MINUTES = 3          # 쿨타임: 3분
+MAX_BET = 30
+SUCCESS_PROB = 0.5            # 1/2 확률
 
 class EconomyCog(commands.Cog):
     """
     .지급 @유저 양:n
     .회수 @유저 양:n
-    .도박 n (n<=30, 성공 1/3, 쿨타임 12시간/유저별, 실제 베팅 성공시에만 시작)
     .지갑 [@유저]
+    .도박 n               (1 ≤ n ≤ 30, 성공 1/2, 당첨 시 2배, 유저별 쿨타임 3분, 베팅 성공시에만 쿨 시작)
+    .도박 초기화 @유저     (관리자 전용, 해당 유저의 도박 쿨타임 초기화)
     """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -44,9 +48,7 @@ class EconomyCog(commands.Cog):
     async def wallet(self, ctx: commands.Context, member: discord.Member | None = None):
         target = member or ctx.author
         points = get_points(target.id)  # utils.stats가 기본 레코드 보장
-        # 미뮤 스타일 텍스트 응답
         await ctx.send(f"{target.mention} 님은 **{format_num(points)} {CURRENCY}**를 보유하고 있어요!")
-
 
     # --------- 지급(관리권한 필요) ---------
     @commands.has_guild_permissions(manage_guild=True)
@@ -104,32 +106,32 @@ class EconomyCog(commands.Cog):
         if isinstance(error, commands.MissingPermissions):
             await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
 
-    # --------- 도박 (수동 쿨타임 관리) ---------
-    @commands.command(name="도박")
+    # --------- 도박(그룹: 본명령 + 초기화) ---------
+    @commands.group(name="도박", invoke_without_command=True)
     async def gamble(self, ctx: commands.Context, amount: int):
         """
         사용법: .도박 n   (1 ≤ n ≤ 30)
-        - 성공(1/3) 시 2배 지급(베팅액을 먼저 회수한 뒤 2n 지급 → 순이익 +n)
-        - 실패(2/3) 시 베팅액 회수
-        - 쿨타임: 유저별 12시간 (실제 베팅이 이루어진 경우에만 시작)
+        - 성공: 확률 1/2, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
+        - 실패: 베팅액 회수
+        - 쿨타임: 유저별 3분 (베팅이 실제로 진행된 경우에만 시작)
         """
         # 입력 검증 (쿨타임 시작 안 함)
-        if amount <= 0 or amount > 30:
-            await ctx.reply("베팅 금액은 1 ~ 30 사이여야 합니다.")
+        if amount <= 0 or amount > MAX_BET:
+            await ctx.reply(f"베팅 금액은 1 ~ {MAX_BET} 사이여야 합니다.")
             return
 
         # 유저별 쿨타임 체크
         now = datetime.now(timezone.utc)
         last = get_last_gamble(ctx.author.id)
-        cooldown = timedelta(hours=12)
+        cooldown = timedelta(minutes=COOLDOWN_MINUTES)   # ✅ 분 단위 쿨타임
         if last and now - last < cooldown:
             remain = cooldown - (now - last)
-            hrs = remain.seconds // 3600 + remain.days * 24
+            hrs_total = remain.days * 24 + remain.seconds // 3600
             mins = (remain.seconds % 3600) // 60
             secs = remain.seconds % 60
             msg = "쿨타임입니다. "
-            if hrs:
-                msg += f"{hrs}시간 "
+            if hrs_total:
+                msg += f"{hrs_total}시간 "
             if mins:
                 msg += f"{mins}분 "
             msg += f"{secs}초 후에 다시 시도하세요."
@@ -141,15 +143,17 @@ class EconomyCog(commands.Cog):
             await ctx.reply(f"잔액이 부족합니다. (보유: {format_num(get_points(ctx.author.id))} {CURRENCY})")
             return
 
+        # 베팅이 진행된 시점에 쿨타임 기록
         set_last_gamble(ctx.author.id, now)
 
-        win = random.random() < (1.0 / 3.0)
+        win = random.random() < SUCCESS_PROB  # 1/2
         if win:
+            # 총 2n 지급 → 직전에 n 차감했으므로 순이익 +n
             new_balance = add_points(ctx.author.id, amount * 2)
             result = f"🎉 성공! **{format_num(amount * 2)} {CURRENCY}** 획득"
             color = discord.Color.green()
         else:
-            new_balance = get_points(ctx.author.id)  # 이미 amount 회수됨
+            new_balance = get_points(ctx.author.id)  # 이미 n 회수됨
             result = f"😵 실패! **{format_num(amount)} {CURRENCY}** 회수"
             color = discord.Color.red()
 
@@ -160,3 +164,25 @@ class EconomyCog(commands.Cog):
             color=color
         )
         await ctx.send(embed=embed)
+
+    # 관리자 전용: 유저 도박 쿨타임 초기화
+    @gamble.command(name="초기화")
+    @commands.has_guild_permissions(manage_guild=True)
+    async def gamble_reset(self, ctx: commands.Context, member: discord.Member):
+        """
+        사용법: .도박 초기화 @유저
+        해당 유저의 도박 쿨타임(최근 베팅 시각)을 제거합니다.
+        """
+        last = get_last_gamble(member.id)
+        # set_last_gamble(..., None) 은 utils.stats 에서 키 제거/None 처리
+        set_last_gamble(member.id, None)
+
+        if last:
+            await ctx.reply(f"{member.mention} 님의 도박 쿨타임을 초기화했어요. 지금 바로 도박이 가능합니다.")
+        else:
+            await ctx.reply(f"{member.mention} 님은 이미 도박 쿨타임이 없어요.")
+
+    @gamble_reset.error
+    async def _gamble_reset_error(self, ctx: commands.Context, error: Exception):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
