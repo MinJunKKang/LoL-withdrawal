@@ -19,7 +19,7 @@ DEFAULT_USER = {
     "경험치": 0,
     "출석_마지막": None,   # "YYYY-MM-DD"
     "히스토리": [],        # 최근 경기 결과 기록: 1(승) / 0(패)
-    "도박_최근": None,     # 마지막 도박 시간(ISO 8601, UTC)
+    "도박_최근": None,     # 마지막 도박 시간(ISO 8601, UTC / or None)
 }
 
 # ── JSON helpers
@@ -56,7 +56,10 @@ def ensure_user(stats: dict, uid: str) -> dict:
     return rec
 
 def format_num(n: int | float) -> str:
-    return f"{n:,}"
+    try:
+        return f"{int(n):,}"
+    except Exception:
+        return f"{n:,}"
 
 # ── 내전 결과 저장(히스토리 포함)
 def update_result_dual(user_id: int | str, won: bool) -> None:
@@ -89,18 +92,22 @@ def add_points(user_id: int | str, amount: int) -> int:
     rec = ensure_user(stats, str(user_id))
     rec["포인트"] = max(0, int(rec.get("포인트", 0)) + int(amount))
     save_stats(stats)
-    return rec["포인트"]
+    return int(rec["포인트"])
 
 def can_spend_points(user_id: int | str, amount: int) -> bool:
     return get_points(user_id) >= int(amount)
 
 def spend_points(user_id: int | str, amount: int) -> bool:
+    """잔액 부족 시 False, 성공 시 True"""
     amount = int(amount)
+    if amount <= 0:
+        return True
     stats = load_stats()
     rec = ensure_user(stats, str(user_id))
-    if rec.get("포인트", 0) < amount:
+    cur = int(rec.get("포인트", 0))
+    if cur < amount:
         return False
-    rec["پو인트" if "포인트" not in rec else "포인트"] = int(rec.get("포인트", 0)) - amount
+    rec["포인트"] = cur - amount  # << 오타 키 제거, 정상 키만 사용
     save_stats(stats)
     return True
 
@@ -124,17 +131,29 @@ def get_last_gamble(user_id: int | str) -> datetime | None:
     return _parse_iso_or_none(rec.get("도박_최근"))
 
 def set_last_gamble(user_id: int | str, when: datetime | None = None) -> None:
-    """마지막 도박 시각을 기록. 기본은 지금(UTC)."""
+    """
+    마지막 도박 시각을 기록.
+    - when is None: 쿨타임 해제(필드에 None 저장)
+    - when 제공 시: 해당 시각(UTC)으로 저장
+    - when 생략 시: 현재(UTC) 저장
+    """
     stats = load_stats()
     rec = ensure_user(stats, str(user_id))
-    when = when or datetime.now(timezone.utc)
-    rec["도박_최근"] = when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    if when is None:
+        rec["도박_최근"] = None  # << 초기화 요청: 확실히 None으로 저장
+        save_stats(stats)
+        return
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    when = when.astimezone(timezone.utc)
+    rec["도박_최근"] = when.isoformat().replace("+00:00", "Z")
     save_stats(stats)
 
 def gamble_cooldown_remaining(user_id: int | str, hours: int = 12) -> int:
     """
     남은 쿨타임(초) 반환. 쿨타임이 없으면 0.
-    economy.py에서 수동 체크용으로 사용 가능.
     """
     last = get_last_gamble(user_id)
     if not last:
