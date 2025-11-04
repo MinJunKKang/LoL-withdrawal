@@ -27,13 +27,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix=".", intents=intents)
+bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
 
 async def setup_hook():
     await bot.add_cog(MatchCog(bot, role_ids=ROLE_IDS))
     await bot.add_cog(EconomyCog(bot))
     await bot.add_cog(StatsCog(bot))
     await bot.add_cog(RoleShopCog(bot))
+    await bot.load_extension("cogs.help_kor")
 
 bot.setup_hook = setup_hook
 
