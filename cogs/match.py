@@ -60,7 +60,7 @@ class Game:
         self.message: Optional[discord.Message] = None  # 모집 메시지
 
         # 팀 구성 (드래프트)
-        self.team_captains: List[int] = []            # [캡틴1, 캡틴2]
+        self.team_captains: List[int] = []            # [팀장1, 팀장2]  ← 순서 고정(1팀/2팀)
         self.teams: Dict[int, List[int]] = {1: [], 2: []}
         self.pick_order: List[int] = []               # 예: [1,2,2,1,1,2,2,1]
         self.draft_turn: int = 0
@@ -143,7 +143,7 @@ class Game:
 
 # ====== Cog ======
 class MatchCog(commands.Cog):
-    """내전(슬롯 모집/대기/드롭다운 팀장-드래프트/결과 기록/OPGG) 전담 Cog"""
+    """내전(슬롯 모집/대기/드롭다운 팀장-드래프트/결과 기록/OPGG + 관리자 패널) 전담 Cog"""
 
     def __init__(self, bot: commands.Bot, role_ids: Dict[str, int]):
         self.bot = bot
@@ -202,7 +202,7 @@ class MatchCog(commands.Cog):
 
         def team_list(team_no: int) -> str:
             members = []
-            # 캡틴은 별도 표시 (드래프트 진행 중일 때 teams에 이미 포함됨)
+            # 팀장은 별도 표시
             if len(game.team_captains) >= team_no and game.team_captains[team_no-1] is not None:
                 members.append(f"⭐ {name(game.team_captains[team_no-1])}")
             for uid in game.teams[team_no]:
@@ -224,6 +224,28 @@ class MatchCog(commands.Cog):
     async def _refresh_lobby(self, guild: discord.Guild, game: Game):
         if game.message:
             await game.message.edit(embed=self._build_lobby_embed(guild, game), view=self.LobbyView(self, game))
+
+    def _build_team_embed(self, guild: discord.Guild, game: Game) -> discord.Embed:
+        def names(team_no: int) -> List[str]:
+            arr = []
+            for uid in game.teams[team_no]:
+                m = guild.get_member(uid)
+                if not m:
+                    continue
+                tag = "⭐ " if len(game.team_captains) >= team_no and uid == game.team_captains[team_no-1] else "- "
+                arr.append(f"{tag}{m.display_name}")
+            return arr
+
+        t1 = "\n".join(names(1)) or "-"
+        t2 = "\n".join(names(2)) or "-"
+        embed = discord.Embed(title=f"내전 #{game.id} 팀 구성 현황", color=0x2F3136)
+        embed.add_field(name="🟦 1팀", value=t1, inline=True)
+        embed.add_field(name="🟥 2팀", value=t2, inline=True)
+        return embed
+
+    async def _refresh_team_status(self, guild: discord.Guild, game: Game):
+        if game.team_status_message:
+            await game.team_status_message.edit(embed=self._build_team_embed(guild, game), view=self.TeamManageEntryView(self, game))
 
     # ---------- 티어 정렬(팀장 선택용) ----------
     async def get_sorted_participants_by_tier(self, guild: discord.Guild, user_ids: List[int]) -> List[str]:
@@ -305,7 +327,7 @@ class MatchCog(commands.Cog):
             ok, msg = game.add_waitlist(user_id)
             await ctx.send(msg)
 
-    # ========= 드롭다운: 팀장 선택 → 드래프트 =========
+    # ========= 팀장 선택(2단계) → 드래프트 =========
     async def start_team_leader_selection(self, interaction: discord.Interaction, game: Game):
         guild = interaction.guild
         assert guild is not None
@@ -321,39 +343,64 @@ class MatchCog(commands.Cog):
 
         cog = self
 
-        class CaptainSelectView(View):
+        # 1단계: 1팀장 선택
+        class Captain1View(View):
             def __init__(self):
                 super().__init__(timeout=None)
 
-            @discord.ui.select(placeholder="팀장을 선택하세요 (두 명)", min_values=2, max_values=2, options=options)
-            async def select_callback(self, inner_interaction: discord.Interaction, select: Select):
-                if inner_interaction.user.id != game.host_id and not inner_interaction.user.guild_permissions.manage_guild:
-                    await inner_interaction.response.send_message("팀장 선택은 개최자 또는 관리자만 가능합니다.", ephemeral=True)
+            @discord.ui.select(placeholder="1팀장을 선택하세요 (한 명)", min_values=1, max_values=1, options=options)
+            async def select_c1(self, inner: discord.Interaction, select: Select):
+                if inner.user.id != game.host_id and not inner.user.guild_permissions.manage_guild:
+                    await inner.response.send_message("팀장 선택은 개최자 또는 관리자만 가능합니다.", ephemeral=True)
                     return
+                c1 = int(select.values[0])
 
-                game.team_captains = [int(uid) for uid in select.values]
+                # 2단계 뷰로 교체 (2팀장은 남은 인원에서 선택)
+                remain_opts = [o for o in options if int(o.value) != c1]
 
-                embed = discord.Embed(
-                    title="팀장 선택 완료",
-                    description="팀장이 선택되었습니다! 팀 구성을 시작합니다.",
-                    color=0x2F3136
+                class Captain2View(View):
+                    def __init__(self):
+                        super().__init__(timeout=None)
+
+                    @discord.ui.select(placeholder="2팀장을 선택하세요 (한 명)", min_values=1, max_values=1, options=remain_opts)
+                    async def select_c2(self, inner2: discord.Interaction, select2: Select):
+                        if inner2.user.id != game.host_id and not inner2.user.guild_permissions.manage_guild:
+                            await inner2.response.send_message("팀장 선택은 개최자 또는 관리자만 가능합니다.", ephemeral=True)
+                            return
+                        c2 = int(select2.values[0])
+
+                        # 순서 고정: [1팀장, 2팀장]
+                        game.team_captains = [c1, c2]
+
+                        embed = discord.Embed(
+                            title="팀장 선택 완료",
+                            description="팀장이 선택되었습니다! 팀 구성을 시작합니다.",
+                            color=0x2F3136
+                        )
+                        await inner2.response.edit_message(embed=embed, view=None)
+                        await cog.start_draft(inner2, game)
+
+                await inner.response.edit_message(
+                    embed=discord.Embed(title="팀장 선택 (2/2)", description="2팀장을 선택해주세요.", color=0x2F3136),
+                    view=Captain2View()
                 )
-                await inner_interaction.response.edit_message(embed=embed, view=None)
-                await cog.start_draft(inner_interaction, game)
 
         embed = discord.Embed(
-            title="팀장 선택",
-            description="티어 순으로 정렬된 명단에서 팀장을 선택해주세요:",
+            title="팀장 선택 (1/2)",
+            description="명단에서 1팀장을 선택해주세요:",
             color=0x2F3136
         )
-        await interaction.channel.send(embed=embed, view=CaptainSelectView())
+        await interaction.channel.send(embed=embed, view=Captain1View())
 
     async def start_draft(self, interaction: discord.Interaction, game: Game):
+        # 플레이어 풀(팀장 제외)
         players = [uid for uid in game.participants if uid not in game.team_captains]
         random.shuffle(players)
+
+        # 선픽 팀 랜덤
         first = random.choice([1, 2])
 
-        random.shuffle(game.team_captains)
+        # ❗ 팀장 순서는 고정(1팀, 2팀). 더 이상 셔플하지 않음.
         game.teams[1].append(game.team_captains[0])
         game.teams[2].append(game.team_captains[1])
 
@@ -362,13 +409,9 @@ class MatchCog(commands.Cog):
         guild = interaction.guild
         assert guild is not None
 
-        c1 = guild.get_member(game.team_captains[0]).display_name
-        c2 = guild.get_member(game.team_captains[1]).display_name
-        embed = discord.Embed(title=f"내전 #{game.id} 팀 구성 현황", color=0x2F3136)
-        embed.add_field(name="1팀", value=f"- {c1}", inline=True)
-        embed.add_field(name="2팀", value=f"- {c2}", inline=True)
-
-        game.team_status_message = await interaction.channel.send(embed=embed)
+        embed = self._build_team_embed(guild, game)
+        # 팀 현황 메시지에는 항상 관리자 진입 버튼을 붙인다
+        game.team_status_message = await interaction.channel.send(embed=embed, view=self.TeamManageEntryView(self, game))
         await self.send_draft_ui(interaction.channel, game, players)
 
     async def send_draft_ui(self, channel: discord.TextChannel, game: Game, available: List[int]):
@@ -380,19 +423,23 @@ class MatchCog(commands.Cog):
         captain_id = game.team_captains[team_num - 1]
         guild = channel.guild
 
-        def create_team_embed():
-            team1_members = [guild.get_member(u).display_name for u in game.teams[1]]
-            team2_members = [guild.get_member(u).display_name for u in game.teams[2]]
-            embed = discord.Embed(title=f"내전 #{game.id} 팀 구성 현황", color=0x2F3136)
-            embed.add_field(name="1팀", value="\n".join(f"- {n}" for n in team1_members) or "-", inline=True)
-            embed.add_field(name="2팀", value="\n".join(f"- {n}" for n in team2_members) or "-", inline=True)
-            return embed
-
         cog = self
 
         class DraftView(View):
             def __init__(self):
                 super().__init__(timeout=None)
+                # 관리 진입 버튼(드래프트 중에도 관리자가 사용할 수 있도록)
+                self.add_item(discord.ui.Button(label="관리", style=discord.ButtonStyle.secondary, custom_id="__manage_entry__"))
+
+            async def interaction_check(self, interaction: discord.Interaction) -> bool:
+                # "관리" 버튼 커스텀 처리
+                if interaction.data and interaction.data.get("custom_id") == "__manage_entry__":
+                    if not cog._is_host_or_admin(interaction, game):
+                        await interaction.response.send_message("관리자(Manage Guild) 또는 개최자만 사용할 수 있습니다.", ephemeral=True)
+                        return False
+                    await interaction.response.send_message("관리 패널을 여셨습니다.", ephemeral=True, view=cog.AdminMenuView(cog, game))
+                    return False
+                return True
 
             @discord.ui.select(
                 placeholder=f"{team_num}팀 픽 대상 선택",
@@ -400,7 +447,7 @@ class MatchCog(commands.Cog):
                 max_values=1,
                 options=[
                     discord.SelectOption(
-                        label=guild.get_member(uid).display_name,
+                        label=guild.get_member(uid).display_name if guild.get_member(uid) else f"{uid}",
                         value=str(uid)
                     ) for uid in available
                 ]
@@ -420,13 +467,13 @@ class MatchCog(commands.Cog):
                 game.pick_history.append((team_num, uid))
                 game.draft_turn += 1
 
-                await game.team_status_message.edit(embed=create_team_embed())
+                await game.team_status_message.edit(embed=cog._build_team_embed(guild, game), view=cog.TeamManageEntryView(cog, game))
                 await interaction.message.delete()
                 await cog.send_draft_ui(channel, game, available)
 
             @discord.ui.button(label="↩ 되돌리기", style=discord.ButtonStyle.secondary)
             async def undo_pick(self, interaction: discord.Interaction, button: Button):
-                if interaction.user.id != game.host_id and not interaction.user.guild_permissions.manage_guild:
+                if not cog._is_host_or_admin(interaction, game):
                     await interaction.response.send_message("되돌리기는 개최자 또는 관리자만 가능합니다.", ephemeral=True)
                     return
 
@@ -445,7 +492,7 @@ class MatchCog(commands.Cog):
                 if game.draft_turn > 0:
                     game.draft_turn -= 1
 
-                await game.team_status_message.edit(embed=create_team_embed())
+                await game.team_status_message.edit(embed=cog._build_team_embed(guild, game), view=cog.TeamManageEntryView(cog, game))
 
                 try:
                     await interaction.message.delete()
@@ -455,7 +502,7 @@ class MatchCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"{team_num}팀 팀원 선택",
-            description=f"{guild.get_member(captain_id).display_name}님, 팀원을 선택하세요:",
+            description=f"{guild.get_member(captain_id).display_name if guild.get_member(captain_id) else captain_id}님, 팀원을 선택하세요:",
             color=0x2F3136
         )
         await channel.send(embed=embed, view=DraftView())
@@ -529,11 +576,22 @@ class MatchCog(commands.Cog):
 
     # ========= View들 =========
     class LobbyView(View):
-        """모집 메시지의 기본 컨트롤러"""
+        """모집 메시지의 기본 컨트롤러 + 관리자 진입"""
         def __init__(self, cog: "MatchCog", game: Game):
             super().__init__(timeout=None)
             self.cog = cog
             self.game = game
+            # 관리 버튼(표시는 모두가 보지만, 권한 체크 후 에페메랄로 패널 제공)
+            self.add_item(discord.ui.Button(label="관리", style=discord.ButtonStyle.secondary, custom_id="__manage_entry__"))
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.data and interaction.data.get("custom_id") == "__manage_entry__":
+                if not self.cog._is_host_or_admin(interaction, self.game):
+                    await interaction.response.send_message("관리자(Manage Guild) 또는 개최자만 사용할 수 있습니다.", ephemeral=True)
+                    return False
+                await interaction.response.send_message("관리 패널을 여셨습니다.", ephemeral=True, view=self.cog.AdminMenuView(self.cog, self.game))
+                return False
+            return True
 
         async def _refresh(self, interaction: discord.Interaction):
             await self.cog._refresh_lobby(interaction.guild, self.game)
@@ -620,6 +678,255 @@ class MatchCog(commands.Cog):
             embed = interaction.message.embeds[0]
             embed.title = f"내전 #{self.game.id} — 종료됨"
             await interaction.response.edit_message(embed=embed, view=self)
+
+    class TeamManageEntryView(View):
+        """팀 현황 메시지에 붙는 '관리' 진입 버튼"""
+        def __init__(self, cog: "MatchCog", game: Game):
+            super().__init__(timeout=None)
+            self.cog = cog
+            self.game = game
+            self.add_item(discord.ui.Button(label="관리", style=discord.ButtonStyle.secondary, custom_id="__manage_entry__"))
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.data and interaction.data.get("custom_id") == "__manage_entry__":
+                if not self.cog._is_host_or_admin(interaction, self.game):
+                    await interaction.response.send_message("관리자(Manage Guild) 또는 개최자만 사용할 수 있습니다.", ephemeral=True)
+                    return False
+                await interaction.response.send_message("관리 패널을 여셨습니다.", ephemeral=True, view=self.cog.AdminMenuView(self.cog, self.game))
+                return False
+            return True
+
+    # ------ 관리자 패널(에페메랄) ------
+    class AdminMenuView(View):
+        def __init__(self, cog: "MatchCog", game: Game):
+            super().__init__(timeout=300)
+            self.cog = cog
+            self.game = game
+
+        @discord.ui.button(label="멤버 제외", style=discord.ButtonStyle.danger)
+        async def kick_member(self, interaction: discord.Interaction, button: Button):
+            if not self.cog._is_host_or_admin(interaction, self.game):
+                await interaction.response.send_message("권한이 없습니다.", ephemeral=True)
+                return
+            await interaction.response.edit_message(content="제외할 멤버를 선택하세요.", view=self.cog.KickView(self.cog, self.game))
+
+        @discord.ui.button(label="멤버 교체", style=discord.ButtonStyle.primary)
+        async def replace_member(self, interaction: discord.Interaction, button: Button):
+            if not self.cog._is_host_or_admin(interaction, self.game):
+                await interaction.response.send_message("권한이 없습니다.", ephemeral=True)
+                return
+            await interaction.response.edit_message(content="교체할 팀을 선택하세요.", view=self.cog.ReplaceTeamPickView(self.cog, self.game))
+
+        @discord.ui.button(label="닫기", style=discord.ButtonStyle.secondary)
+        async def close(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="관리 패널을 닫았습니다.", view=None)
+
+    class KickView(View):
+        """팀장 제외(킥 불가), 일반 팀원/참가자/대기열 제외"""
+        def __init__(self, cog: "MatchCog", game: Game):
+            super().__init__(timeout=300)
+            self.cog = cog
+            self.game = game
+
+            guild = self.cog.bot.get_guild(self.cog.bot.guilds[0].id) if self.cog.bot.guilds else None
+            # 옵션 구성
+            opts: List[discord.SelectOption] = []
+            def add_opt(uid: int, label_prefix: str):
+                m = guild.get_member(uid) if guild else None
+                label = f"{label_prefix} {m.display_name if m else uid}"
+                opts.append(discord.SelectOption(label=label, value=str(uid)))
+
+            # 팀원(팀장 제외)
+            for t in (1, 2):
+                for uid in self.game.teams[t]:
+                    if uid == (self.game.team_captains[t-1] if len(self.game.team_captains) >= t else None):
+                        continue  # 팀장은 킥으로 제외하지 않음
+                    add_opt(uid, f"[팀{t}]")
+
+            # 슬롯 참가자(팀 미배정)
+            assigned = set(self.game.teams[1] + self.game.teams[2])
+            for uid in self.game.participants:
+                if uid in assigned:
+                    continue
+                add_opt(uid, "[참여]")
+
+            # 대기열
+            for uid in self.game.waitlist:
+                add_opt(uid, "[대기]")
+
+            if not opts:
+                opts = [discord.SelectOption(label="제외할 대상이 없습니다.", value="-1", description="돌아가기를 누르세요.")]
+
+            self._select = Select(placeholder="제외할 멤버 선택", min_values=1, max_values=1, options=opts)
+            self.add_item(self._select)
+
+        @discord.ui.button(label="제외 실행", style=discord.ButtonStyle.danger)
+        async def do_kick(self, interaction: discord.Interaction, button: Button):
+            if not self.cog._is_host_or_admin(interaction, self.game):
+                await interaction.response.send_message("권한이 없습니다.", ephemeral=True)
+                return
+            if not self._select.values or self._select.values[0] == "-1":
+                await interaction.response.send_message("대상을 선택해주세요.", ephemeral=True)
+                return
+            uid = int(self._select.values[0])
+
+            # 대기열에서 제거 우선
+            if uid in self.game.waitlist:
+                self.game.remove_from_waitlist(uid)
+            # 팀에서 제거(팀장 보호는 옵션 구성에서 제외함)
+            for t in (1, 2):
+                if uid in self.game.teams[t]:
+                    self.game.teams[t].remove(uid)
+            # 슬롯에서 제거
+            freed = self.game.remove_from_slot(uid)
+            if freed is not None:
+                self.game.autopromote_waiter(freed)
+
+            await self.cog._refresh_lobby(interaction.guild, self.game)
+            await self.cog._refresh_team_status(interaction.guild, self.game)
+            await interaction.response.edit_message(content="제외를 완료했습니다.", view=self.cog.AdminMenuView(self.cog, self.game))
+
+        @discord.ui.button(label="뒤로", style=discord.ButtonStyle.secondary)
+        async def back(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="관리 메뉴로 돌아갑니다.", view=self.cog.AdminMenuView(self.cog, self.game))
+
+    class ReplaceTeamPickView(View):
+        """교체할 팀 선택 → 다음 단계로"""
+        def __init__(self, cog: "MatchCog", game: Game):
+            super().__init__(timeout=300)
+            self.cog = cog
+            self.game = game
+
+        @discord.ui.button(label="🟦 1팀", style=discord.ButtonStyle.primary)
+        async def pick_t1(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="교체할 1팀 멤버와 투입 멤버를 선택하세요.", view=self.cog.ReplacePickView(self.cog, self.game, team_no=1))
+
+        @discord.ui.button(label="🟥 2팀", style=discord.ButtonStyle.danger)
+        async def pick_t2(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="교체할 2팀 멤버와 투입 멤버를 선택하세요.", view=self.cog.ReplacePickView(self.cog, self.game, team_no=2))
+
+        @discord.ui.button(label="뒤로", style=discord.ButtonStyle.secondary)
+        async def back(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="관리 메뉴로 돌아갑니다.", view=self.cog.AdminMenuView(self.cog, self.game))
+
+    class ReplacePickView(View):
+        """
+        팀 내 '내보낼 멤버' 1명 + '투입 멤버' 1명 선택
+        - 투입 후보: 상대 팀원(스왑), 대기열, (있다면) 팀 미배정 참가자
+        - 팀장은 교체 가능(투입/내보낼 대상에 포함)하지만, '킥'이 아닌 '교체'를 통해 처리하도록 유도
+        """
+        def __init__(self, cog: "MatchCog", game: Game, team_no: int):
+            super().__init__(timeout=300)
+            self.cog = cog
+            self.game = game
+            self.team_no = team_no
+
+            guild = self.cog.bot.get_guild(self.cog.bot.guilds[0].id) if self.cog.bot.guilds else None
+
+            def label_of(uid: int) -> str:
+                m = guild.get_member(uid) if guild else None
+                return m.display_name if m else str(uid)
+
+            # 내보낼 멤버(팀원 전원 선택 가능, 팀장 포함)
+            out_opts = [
+                discord.SelectOption(label=label_of(uid), value=str(uid))
+                for uid in self.game.teams[self.team_no]
+            ] or [discord.SelectOption(label="팀에 멤버가 없습니다.", value="-1")]
+
+            # 투입 멤버 후보
+            other = 2 if self.team_no == 1 else 1
+            in_opts: List[discord.SelectOption] = []
+
+            # 상대 팀원(스왑)
+            for uid in self.game.teams[other]:
+                in_opts.append(discord.SelectOption(label=f"[상대팀] {label_of(uid)}", value=f"T{other}:{uid}"))
+
+            # 대기열
+            for uid in self.game.waitlist:
+                in_opts.append(discord.SelectOption(label=f"[대기] {label_of(uid)}", value=f"W:{uid}"))
+
+            # 팀 미배정(슬롯엔 있으나 팀엔 없는 참가자)
+            assigned = set(self.game.teams[1] + self.game.teams[2])
+            for uid in self.game.participants:
+                if uid not in assigned:
+                    in_opts.append(discord.SelectOption(label=f"[미배정] {label_of(uid)}", value=f"P:{uid}"))
+
+            if not in_opts:
+                in_opts = [discord.SelectOption(label="투입 가능한 대상이 없습니다.", value="-1")]
+
+            self._out = Select(placeholder="내보낼 멤버", min_values=1, max_values=1, options=out_opts)
+            self._in  = Select(placeholder="투입할 멤버", min_values=1, max_values=1, options=in_opts)
+
+            self.add_item(self._out)
+            self.add_item(self._in)
+
+        @discord.ui.button(label="교체 실행", style=discord.ButtonStyle.success)
+        async def do_replace(self, interaction: discord.Interaction, button: Button):
+            if not self.cog._is_host_or_admin(interaction, self.game):
+                await interaction.response.send_message("권한이 없습니다.", ephemeral=True)
+                return
+            if not self._out.values or not self._in.values or self._out.values[0] == "-1" or self._in.values[0] == "-1":
+                await interaction.response.send_message("대상을 선택해주세요.", ephemeral=True)
+                return
+
+            out_uid = int(self._out.values[0])
+            in_token = self._in.values[0]  # 예: "T2:123" / "W:123" / "P:123"
+            src, val = in_token.split(":")
+            in_uid = int(val)
+
+            # 내보낼 멤버는 현재 팀에서 제거
+            if out_uid not in self.game.teams[self.team_no]:
+                await interaction.response.send_message("선택한 내보낼 멤버가 팀에 없습니다.", ephemeral=True)
+                return
+            self.game.teams[self.team_no].remove(out_uid)
+
+            # 투입 후보 처리
+            if src.startswith("T"):  # 상대 팀 스왑
+                other = int(src[1])
+                if in_uid not in self.game.teams[other]:
+                    await interaction.response.send_message("상대 팀 멤버가 아닙니다.", ephemeral=True)
+                    return
+                # 상대 팀에서 빼고 우리 팀에 넣음
+                self.game.teams[other].remove(in_uid)
+                self.game.teams[self.team_no].append(in_uid)
+                # 내보낸 멤버는 상대 팀으로
+                self.game.teams[other].append(out_uid)
+
+            elif src == "W":  # 대기열 → 우리 팀, 내보낸 멤버는 대기열 뒤로
+                if in_uid not in self.game.waitlist:
+                    await interaction.response.send_message("대기열에 없는 사용자입니다.", ephemeral=True)
+                    return
+                self.game.remove_from_waitlist(in_uid)
+                self.game.teams[self.team_no].append(in_uid)
+                # out_uid를 대기열로 보냄(꽉 찼으면 제거)
+                if len(self.game.waitlist) < 5:
+                    self.game.waitlist.append(out_uid)
+                else:
+                    # 슬롯에서 제거 및 공석 승격
+                    freed = self.game.remove_from_slot(out_uid)
+                    if freed is not None:
+                        self.game.autopromote_waiter(freed)
+
+            elif src == "P":  # 미배정 → 우리 팀, out은 그대로 참가 상태 유지(미배정으로 남김)
+                # in_uid가 슬롯에 있는지 보장
+                if in_uid not in self.game.participants:
+                    await interaction.response.send_message("참가 상태가 아닌 사용자입니다.", ephemeral=True)
+                    return
+                self.game.teams[self.team_no].append(in_uid)
+                # out_uid는 팀에서 빠졌으니 미배정(참가자) 상태로 남음
+
+            else:
+                await interaction.response.send_message("알 수 없는 유형입니다.", ephemeral=True)
+                return
+
+            # 팀장 마커 유지(별도 처리 없음). 팀장 교체를 원하면 스왑을 사용하거나 별도 로직 확장.
+            await self.cog._refresh_lobby(interaction.guild, self.game)
+            await self.cog._refresh_team_status(interaction.guild, self.game)
+            await interaction.response.edit_message(content="교체를 완료했습니다.", view=self.cog.AdminMenuView(self.cog, self.game))
+
+        @discord.ui.button(label="뒤로", style=discord.ButtonStyle.secondary)
+        async def back(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.edit_message(content="팀 선택으로 돌아갑니다.", view=self.cog.ReplaceTeamPickView(self.cog, self.game))
 
     class ResultView(View):
         def __init__(self, cog: "MatchCog", game: Game):
