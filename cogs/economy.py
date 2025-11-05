@@ -13,7 +13,7 @@ from utils.stats import (
 
 CURRENCY = "Point"
 COOLDOWN_MINUTES = 3          # 쿨타임: 3분
-MAX_BET = 30
+MAX_BET = 50
 SUCCESS_PROB = 0.5            # 1/2 확률
 
 class EconomyCog(commands.Cog):
@@ -21,7 +21,7 @@ class EconomyCog(commands.Cog):
     .지급 @유저 양:n
     .회수 @유저 양:n
     .지갑 [@유저]
-    .도박 n               (1 ≤ n ≤ 30, 성공 1/2, 당첨 시 2배, 유저별 쿨타임 3분, 베팅 성공시에만 쿨 시작)
+    .도박 n               (1 ≤ n ≤ 50, 성공 1/2, 당첨 시 2배, 유저별 쿨타임 3분, 베팅 성공시에만 쿨 시작)
     .도박 초기화 @유저     (관리자 전용, 해당 유저의 도박 쿨타임 초기화)
     """
     def __init__(self, bot: commands.Bot):
@@ -110,7 +110,7 @@ class EconomyCog(commands.Cog):
     @commands.group(name="도박", invoke_without_command=True)
     async def gamble(self, ctx: commands.Context, amount: int):
         """
-        사용법: .도박 n   (1 ≤ n ≤ 30)
+        사용법: .도박 n   (1 ≤ n ≤ 50)
         - 성공: 확률 1/2, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
         - 실패: 베팅액 회수
         - 쿨타임: 유저별 3분 (베팅이 실제로 진행된 경우에만 시작)
