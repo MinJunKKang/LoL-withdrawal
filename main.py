@@ -8,6 +8,7 @@ from cogs.match import MatchCog
 from cogs.economy import EconomyCog
 from cogs.stats_view import StatsCog
 from cogs.role_shop import RoleShopCog
+from cogs.minigames import MinigamesCog
 
 config = configparser.ConfigParser()
 config.read("config.ini", encoding="utf-8")
@@ -34,6 +35,7 @@ async def setup_hook():
     await bot.add_cog(EconomyCog(bot))
     await bot.add_cog(StatsCog(bot))
     await bot.add_cog(RoleShopCog(bot))
+    await bot.add_cog(MinigamesCog(bot))
     await bot.load_extension("cogs.help_kor")
 
 bot.setup_hook = setup_hook
