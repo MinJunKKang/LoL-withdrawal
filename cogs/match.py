@@ -434,7 +434,8 @@ class MatchCog(commands.Cog):
 
             @discord.ui.select(placeholder="1팀장을 선택하세요 (한 명)", min_values=1, max_values=1, options=options)
             async def select_c1(self, inner: discord.Interaction, select: Select):
-                if inner.user.id != game.host_id and not inner.user.guild_permissions.manage_guild:
+                # ✅ 개최자 또는 관리자만 가능
+                if not cog._is_host_or_admin(inner, game):
                     await inner.response.send_message("팀장 선택은 개최자 또는 관리자만 가능합니다.", ephemeral=True)
                     return
                 c1 = int(select.values[0])
@@ -448,7 +449,8 @@ class MatchCog(commands.Cog):
 
                     @discord.ui.select(placeholder="2팀장을 선택하세요 (한 명)", min_values=1, max_values=1, options=remain_opts)
                     async def select_c2(self, inner2: discord.Interaction, select2: Select):
-                        if inner2.user.id != game.host_id and not inner2.user.guild_permissions.manage_guild:
+                        # ✅ 개최자 또는 관리자만 가능
+                        if not cog._is_host_or_admin(inner2, game):
                             await inner2.response.send_message("팀장 선택은 개최자 또는 관리자만 가능합니다.", ephemeral=True)
                             return
                         c2 = int(select2.values[0])
@@ -481,14 +483,15 @@ class MatchCog(commands.Cog):
         players = [uid for uid in game.participants if uid not in game.team_captains]
         random.shuffle(players)
 
-        # 선픽 팀 랜덤
-        first = random.choice([1, 2])
+        # ✅ 선픽 팀 고정: 항상 1팀(블루팀) 먼저
+        first = 1
 
         # 팀장 순서는 고정(1팀, 2팀)
         game.teams[1].append(game.team_captains[0])
         game.teams[2].append(game.team_captains[1])
 
-        game.pick_order = [1, 2, 2, 1, 1, 2, 2, 1] if first == 1 else [2, 1, 1, 2, 2, 1, 1, 2]
+        # ✅ 1팀 선픽의 스네이크(지그재그) 픽 순서
+        game.pick_order = [1, 2, 2, 1, 1, 2, 2, 1]
 
         guild = interaction.guild
         assert guild is not None
