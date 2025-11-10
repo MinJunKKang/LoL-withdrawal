@@ -14,8 +14,8 @@ from utils.stats import update_result_dual, add_points
 
 # ===== 상수 =====
 CURRENCY = "Point"
-WIN_REWARD = 5
-LOSE_REWARD = 3
+WIN_REWARD = 50
+LOSE_REWARD = 30
 
 WAITLIST_MAX = 10            # ✨ 대기 최대 인원 확장 (5 -> 10)
 AUTO_PROMOTE_ENABLED = False # ✨ 자동 승격 비활성화 (기본 False)
