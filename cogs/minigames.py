@@ -1,63 +1,193 @@
 # cogs/minigames.py
 import random
 from typing import Optional, List
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord.ext import commands
 
 from utils.stats import (
+    load_stats, save_stats, ensure_user,  # ⬅️ per-game 쿨타임 저장/로드
     get_points, spend_points, add_points, format_num
 )
 
 CURRENCY = "Point"
 
-COIN_MIN_BALANCE_REQUIRED = 9   # 동전: 실패 시 총 -9이므로 최소 9 보유 요구
-COIN_ENTRY_COST = 3
-COIN_REWARD_ON_HIT = 9
-COIN_EXTRA_LOSS_ON_MISS = 6
+# ── 쿨타임(각 미니게임별로 적용) ───────────────────────────────────────────────
+MINIGAME_COOLDOWN_HOURS = 3
 
-DICE1_ENTRY_COST = 2
-DICE1_MIN_BALANCE_REQUIRED = 2
-DICE1_REWARD_1HIT = 12
+# ── 동전던지기 (스케일 반영) ────────────────────────────────────────────────
+COIN_ENTRY_COST = 60
+COIN_REWARD_ON_HIT = 270
+COIN_EXTRA_LOSS_ON_MISS = 180
+COIN_MIN_BALANCE_REQUIRED = COIN_ENTRY_COST + COIN_EXTRA_LOSS_ON_MISS  # 240
 
-DICE2_ENTRY_COST = 5
-DICE2_FAIL_TOTAL_LOSS = 10      # 둘 다 실패 시 총 -10 → 시작에 5 차감했으니 추가 -5
-DICE2_MIN_BALANCE_REQUIRED = 10
-DICE2_REWARD_ANY = 18           # 하나라도 성공
-DICE2_REWARD_BOTH = 180         # 둘 다 성공
+# ── 주사위 1회 (5배) ────────────────────────────────────────────────────────
+DICE1_ENTRY_COST = 10
+DICE1_MIN_BALANCE_REQUIRED = 10
+DICE1_REWARD_1HIT = 60
 
-DICE3_ENTRY_COST = 25
-DICE3_FAIL_TOTAL_LOSS = 50      # 전부 실패 시 총 -50 → 시작에 25 차감했으니 추가 -25
-DICE3_MIN_BALANCE_REQUIRED = 50
-DICE3_REWARD_1 = 72
-DICE3_REWARD_2 = 360
-DICE3_REWARD_3 = 5400
+# ── 주사위 2회 (4배) ────────────────────────────────────────────────────────
+DICE2_ENTRY_COST = 40
+DICE2_FAIL_TOTAL_LOSS = 40
+DICE2_MIN_BALANCE_REQUIRED = 40
+DICE2_REWARD_ANY = 72
+DICE2_REWARD_BOTH = 720
+
+# ── 주사위 3회 (지정값) ─────────────────────────────────────────────────────
+DICE3_ENTRY_COST = 100
+DICE3_FAIL_TOTAL_LOSS = 1000
+DICE3_MIN_BALANCE_REQUIRED = 1000
+DICE3_REWARD_1 = 0       # ✅ 1개 성공 보상 0
+DICE3_REWARD_2 = 1000
+DICE3_REWARD_3 = 2500
 
 DICE_CHOICES = ["1", "2", "3", "4", "5", "6"]
 
 
 class MinigamesCog(commands.Cog):
     """
-    .미니게임  → 버튼으로 선택
-      - 동전던지기: 시작 시 3P 차감, 맞추면 +9P, 틀리면 추가 -6P (총 -9)
-      - 주사위 눈 맞추기
-          1회: 2P 차감, 맞추면 +12P (틀리면 추가 차감 없음)
-          2회: 5P 차감, 순서대로 두 번 예측
-               - 하나라도 성공: +18P
-               - 둘 다 성공: +180P
-               - 둘 다 실패: 총 -10P (추가 -5)
-          3회: 25P 차감, 순서대로 세 번 예측
-               - 1개 성공: +72P
-               - 2개 성공: +360P
-               - 3개 성공: +5400P
-               - 전부 실패: 총 -50P (추가 -25)
+    .미니게임  → 버튼으로 선택 (**각 미니게임별 쿨타임 3시간**)
+      - 동전던지기: 시작 60P, 맞추면 +270P, 틀리면 추가 -180P (총 -240) / 최소 보유 240P
+      - 주사위(1회): 시작 10P, 맞추면 +60P
+      - 주사위(2회): 시작 40P, 1개 +72P / 2개 +720P / 둘 다 실패 총 -40P(추가 차감 없음)
+      - 주사위(3회): 시작 100P, 0개 실패 총 -1000P(추가 -900) / 1개 +0P / 2개 +1000P / 3개 +2500P
+
+    .미니게임 초기화 @유저  → @유저의 미니게임 쿨타임을 초기화합니다. (관리자만)
     """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     # ──────────────────────────────────────────
-    # 공통: 뷰 유틸
+    # 쿨타임 유틸 (per-game)
     # ──────────────────────────────────────────
+    @staticmethod
+    def _now_utc() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _get_cd_map(user_id: int) -> dict:
+        stats = load_stats()
+        rec = ensure_user(stats, str(user_id))
+        cdmap = rec.get("minigame_cooldowns")
+        if not isinstance(cdmap, dict):
+            cdmap = {}
+            rec["minigame_cooldowns"] = cdmap
+            save_stats(stats)
+        return cdmap
+
+    @staticmethod
+    def _get_last_minigame(user_id: int, game_key: str) -> Optional[datetime]:
+        cdmap = MinigamesCog._get_cd_map(user_id)
+        iso = cdmap.get(game_key)
+        if not iso:
+            return None
+        try:
+            return datetime.fromisoformat(iso)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _set_last_minigame(user_id: int, game_key: str, when: Optional[datetime] = None) -> None:
+        stats = load_stats()
+        rec = ensure_user(stats, str(user_id))
+        cdmap = rec.get("minigame_cooldowns")
+        if not isinstance(cdmap, dict):
+            cdmap = {}
+            rec["minigame_cooldowns"] = cdmap
+        cdmap[game_key] = (when or MinigamesCog._now_utc()).isoformat()
+        save_stats(stats)
+
+    @staticmethod
+    def _reset_all_cooldowns(user_id: int) -> None:
+        """해당 유저의 모든 미니게임 쿨타임 초기화"""
+        stats = load_stats()
+        rec = ensure_user(stats, str(user_id))
+        rec["minigame_cooldowns"] = {}
+        save_stats(stats)
+
+    @staticmethod
+    def _cooldown_remaining(user_id: int, game_key: str) -> Optional[timedelta]:
+        last = MinigamesCog._get_last_minigame(user_id, game_key)
+        if not last:
+            return None
+        cd = timedelta(hours=MINIGAME_COOLDOWN_HOURS)
+        now = MinigamesCog._now_utc()
+        if now - last >= cd:
+            return None
+        return cd - (now - last)
+
+    @staticmethod
+    def _format_td(remain: timedelta) -> str:
+        total_seconds = int(remain.total_seconds())
+        hours = total_seconds // 3600
+        mins = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        parts = []
+        if hours:
+            parts.append(f"{hours}시간")
+        if mins:
+            parts.append(f"{mins}분")
+        parts.append(f"{secs}초")
+        return " ".join(parts)
+
+    # ──────────────────────────────────────────
+    # 명령 그룹: .미니게임
+    # ──────────────────────────────────────────
+    @commands.group(name="미니게임", invoke_without_command=True)
+    async def minigames_command(self, ctx: commands.Context):
+        """서브커맨드 없이 호출되면 메뉴를 띄웁니다."""
+        uid = ctx.author.id
+        # 각 버튼 상태를 미리 보여주기 위한 남은 시간 조회
+        r_coin  = self._cooldown_remaining(uid, "coin")
+        r_d1    = self._cooldown_remaining(uid, "dice1")
+        r_d2    = self._cooldown_remaining(uid, "dice2")
+        r_d3    = self._cooldown_remaining(uid, "dice3")
+
+        def stat(remain): return "✅ 가능" if not remain else f"⏳ {self._format_td(remain)} 남음"
+
+        # 동적으로 총손실/추가손실 문구 구성
+        d2_extra = DICE2_FAIL_TOTAL_LOSS - DICE2_ENTRY_COST
+        d2_fail_str = f"총 -{DICE2_FAIL_TOTAL_LOSS}{CURRENCY}" + (f" (추가 -{d2_extra}{CURRENCY})" if d2_extra > 0 else " (추가 차감 없음)")
+        d3_extra = DICE3_FAIL_TOTAL_LOSS - DICE3_ENTRY_COST
+        d3_fail_str = f"총 -{DICE3_FAIL_TOTAL_LOSS}{CURRENCY} (추가 -{d3_extra}{CURRENCY})"
+
+        total_coin_loss = COIN_ENTRY_COST + COIN_EXTRA_LOSS_ON_MISS
+
+        desc = (
+            "아래에서 미니게임을 선택하세요! (**각 게임별 쿨타임 3시간**)\n\n"
+            f"• **동전던지기** — 시작 {COIN_ENTRY_COST}{CURRENCY}, 맞추면 +{COIN_REWARD_ON_HIT}{CURRENCY}, 틀리면 추가 -{COIN_EXTRA_LOSS_ON_MISS}{CURRENCY} (총 -{total_coin_loss}{CURRENCY}) — {stat(r_coin)}\n"
+            f"• **주사위(1회)** — 시작 {DICE1_ENTRY_COST}{CURRENCY}, 맞추면 +{DICE1_REWARD_1HIT}{CURRENCY} — {stat(r_d1)}\n"
+            f"• **주사위(2회)** — 시작 {DICE2_ENTRY_COST}{CURRENCY}, 1개 +{DICE2_REWARD_ANY}{CURRENCY} / 2개 +{DICE2_REWARD_BOTH}{CURRENCY} / 둘 다 실패 {d2_fail_str} — {stat(r_d2)}\n"
+            f"• **주사위(3회)** — 시작 {DICE3_ENTRY_COST}{CURRENCY}, 0개 실패 {d3_fail_str} / 1개 +{DICE3_REWARD_1}{CURRENCY} / 2개 +{DICE3_REWARD_2}{CURRENCY} / 3개 +{DICE3_REWARD_3}{CURRENCY} — {stat(r_d3)}\n"
+        )
+        embed = discord.Embed(title="🎲 미니게임", description=desc, color=discord.Color.blurple())
+        await ctx.send(embed=embed, view=self.MenuView(author_id=uid, cog=self))
+
+    # ──────────────────────────────────────────
+    # 관리자 서브커맨드: .미니게임 초기화 @유저
+    # ──────────────────────────────────────────
+    @minigames_command.command(name="초기화")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def reset_cooldown(self, ctx: commands.Context, member: discord.Member):
+        """
+        .미니게임 초기화 @유저
+        @유저의 미니게임 쿨타임을 초기화합니다. (관리자 전용)
+        """
+        self._reset_all_cooldowns(member.id)
+        await ctx.reply(f"✅ {member.mention}의 **모든 미니게임 쿨타임**을 초기화했습니다.")
+
+    @reset_cooldown.error
+    async def reset_cooldown_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.reply("❌ 이 명령은 **관리자만** 사용할 수 있어요.")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.reply("사용법: `.미니게임 초기화 @유저` (멤버를 멘션해 주세요)")
+        else:
+            await ctx.reply(f"처리 중 오류가 발생했습니다: {error}")
+
+    # 공통: 뷰 베이스(작성자만 조작)
     class BaseView(discord.ui.View):
         def __init__(self, author_id: int, timeout: Optional[float] = 120):
             super().__init__(timeout=timeout)
@@ -76,21 +206,6 @@ class MinigamesCog(commands.Cog):
                 except Exception:
                     pass
 
-    # ──────────────────────────────────────────
-    # 엔트리 메뉴
-    # ──────────────────────────────────────────
-    @commands.command(name="미니게임")
-    async def minigames_command(self, ctx: commands.Context):
-        desc = (
-            "아래에서 미니게임을 선택하세요!\n\n"
-            "• **동전던지기** — 시작 3P, 맞추면 +9P, 틀리면 추가 -6P (총 -9)\n"
-            "• **주사위(1회)** — 시작 2P, 맞추면 +12P\n"
-            "• **주사위(2회)** — 시작 5P, 1개 성공 +18P / 2개 성공 +180P / 모두 실패 총 -10P\n"
-            "• **주사위(3회)** — 시작 25P, 1개 +72P / 2개 +360P / 3개 +5400P / 모두 실패 총 -50P\n"
-        )
-        embed = discord.Embed(title="🎲 미니게임", description=desc, color=discord.Color.blurple())
-        await ctx.send(embed=embed, view=self.MenuView(author_id=ctx.author.id, cog=self))
-
     class MenuView(BaseView):
         def __init__(self, author_id: int, cog: "MinigamesCog"):
             super().__init__(author_id=author_id, timeout=120)
@@ -98,8 +213,16 @@ class MinigamesCog(commands.Cog):
 
         @discord.ui.button(label="동전던지기", style=discord.ButtonStyle.primary)
         async def coin_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            # ⛔ 해당 게임 쿨타임 체크
+            remain = self.cog._cooldown_remaining(interaction.user.id, "coin")
+            if remain:
+                await interaction.response.send_message(
+                    f"⏳ 동전던지기는 **{self.cog._format_td(remain)}** 후에 이용 가능해요.",
+                    ephemeral=True
+                )
+                return
+
             user = interaction.user
-            # 사전 잔액 체크(총 -9 가능)
             if get_points(user.id) < COIN_MIN_BALANCE_REQUIRED:
                 await interaction.response.send_message(
                     f"잔액이 부족합니다. 최소 **{COIN_MIN_BALANCE_REQUIRED} {CURRENCY}** 필요해요.",
@@ -107,18 +230,21 @@ class MinigamesCog(commands.Cog):
                 )
                 return
 
-            # 시작 비용 3P
             if not spend_points(user.id, COIN_ENTRY_COST):
                 await interaction.response.send_message("잔액이 부족해요.", ephemeral=True)
                 return
 
+            # ✅ 해당 게임 쿨타임 시작
+            MinigamesCog._set_last_minigame(user.id, "coin")
+
             bal = get_points(user.id)
+            total_loss = COIN_ENTRY_COST + COIN_EXTRA_LOSS_ON_MISS
             desc = (
                 f"**동전던지기 시작!** (현재 보유: {format_num(bal)} {CURRENCY})\n\n"
                 f"규칙:\n"
                 f"• 시작 시 **{COIN_ENTRY_COST} {CURRENCY}** 차감\n"
                 f"• 맞추면 **+{COIN_REWARD_ON_HIT} {CURRENCY}**\n"
-                f"• 틀리면 추가 **-{COIN_EXTRA_LOSS_ON_MISS} {CURRENCY}** (총 -{COIN_ENTRY_COST + COIN_EXTRA_LOSS_ON_MISS})\n\n"
+                f"• 틀리면 추가 **-{COIN_EXTRA_LOSS_ON_MISS} {CURRENCY}** (총 -{total_loss} {CURRENCY})\n\n"
                 "아래에서 **앞/뒤** 를 선택하세요."
             )
             embed = discord.Embed(title="🪙 동전던지기", description=desc, color=discord.Color.gold())
@@ -166,8 +292,7 @@ class MinigamesCog(commands.Cog):
                 msg = f"정답은 **{result}**! 🎉 **+{COIN_REWARD_ON_HIT} {CURRENCY}**"
                 color = discord.Color.green()
             else:
-                # 추가 -6 차감(사전 보유 체크로 실패 가능성은 낮음)
-                spend_points(interaction.user.id, COIN_EXTRA_LOSS_ON_MISS)
+                spend_points(interaction.user.id, COIN_EXTRA_LOSS_ON_MISS)  # 추가 -180
                 new_bal = get_points(interaction.user.id)
                 msg = f"정답은 **{result}**! 😵 **-{COIN_EXTRA_LOSS_ON_MISS} {CURRENCY}** 추가 차감"
                 color = discord.Color.red()
@@ -187,6 +312,17 @@ class MinigamesCog(commands.Cog):
     # 주사위: 공통 시작/진행
     # ──────────────────────────────────────────
     async def _start_dice(self, interaction: discord.Interaction, mode: int):
+        game_key = f"dice{mode}"
+
+        # ⛔ 해당 주사위 모드의 쿨타임 체크
+        remain = self._cooldown_remaining(interaction.user.id, game_key)
+        if remain:
+            await interaction.response.send_message(
+                f"⏳ 주사위({mode}회)는 **{self._format_td(remain)}** 후에 이용 가능해요.",
+                ephemeral=True
+            )
+            return
+
         user = interaction.user
         if mode == 1:
             need = DICE1_MIN_BALANCE_REQUIRED
@@ -208,6 +344,9 @@ class MinigamesCog(commands.Cog):
             await interaction.response.send_message("잔액이 부족해요.", ephemeral=True)
             return
 
+        # ✅ 해당 주사위 모드 쿨타임 시작
+        self._set_last_minigame(user.id, game_key)
+
         bal = get_points(user.id)
         if mode == 1:
             desc = (
@@ -218,23 +357,26 @@ class MinigamesCog(commands.Cog):
             )
             view = self.DiceView(author_id=user.id, mode=1, cog=self)
         elif mode == 2:
+            d2_extra = DICE2_FAIL_TOTAL_LOSS - DICE2_ENTRY_COST
+            fail_line = f"• 둘 다 실패: 총 **-{DICE2_FAIL_TOTAL_LOSS} {CURRENCY}**" + (f" (추가 -{d2_extra} {CURRENCY})" if d2_extra > 0 else " (추가 차감 없음)")
             desc = (
                 f"**주사위(2회)** 시작! (현재 보유: {format_num(bal)} {CURRENCY})\n"
                 f"• 시작 시 **{cost} {CURRENCY}** 차감\n"
                 f"• 하나라도 성공: **+{DICE2_REWARD_ANY} {CURRENCY}**\n"
                 f"• 둘 다 성공: **+{DICE2_REWARD_BOTH} {CURRENCY}**\n"
-                f"• 둘 다 실패: 총 **-{DICE2_FAIL_TOTAL_LOSS} {CURRENCY}** (추가 -{DICE2_FAIL_TOTAL_LOSS - cost})\n\n"
+                f"{fail_line}\n\n"
                 "첫 번째로 나올 눈을 선택하세요."
             )
             view = self.DiceView(author_id=user.id, mode=2, cog=self)
         else:
+            d3_extra = DICE3_FAIL_TOTAL_LOSS - DICE3_ENTRY_COST
             desc = (
                 f"**주사위(3회)** 시작! (현재 보유: {format_num(bal)} {CURRENCY})\n"
                 f"• 시작 시 **{cost} {CURRENCY}** 차감\n"
+                f"• 0개 성공(실패): 총 **-{DICE3_FAIL_TOTAL_LOSS} {CURRENCY}** (추가 -{d3_extra} {CURRENCY})\n"
                 f"• 1개 성공: **+{DICE3_REWARD_1} {CURRENCY}**\n"
                 f"• 2개 성공: **+{DICE3_REWARD_2} {CURRENCY}**\n"
-                f"• 3개 성공: **+{DICE3_REWARD_3} {CURRENCY}**\n"
-                f"• 전부 실패: 총 **-{DICE3_FAIL_TOTAL_LOSS} {CURRENCY}** (추가 -{DICE3_FAIL_TOTAL_LOSS - cost})\n\n"
+                f"• 3개 성공: **+{DICE3_REWARD_3} {CURRENCY}**\n\n"
                 "첫 번째로 나올 눈을 선택하세요."
             )
             view = self.DiceView(author_id=user.id, mode=3, cog=self)
@@ -257,7 +399,6 @@ class MinigamesCog(commands.Cog):
             for i, face in enumerate(DICE_CHOICES, start=1):
                 style = discord.ButtonStyle.primary if i <= 3 else discord.ButtonStyle.secondary
                 self.add_item(MinigamesCog.DiceFaceButton(face_label=face, style=style))
-
             self.add_item(MinigamesCog.DiceCancelButton())
 
         async def handle_guess(self, interaction: discord.Interaction, face_value: int):
@@ -266,10 +407,10 @@ class MinigamesCog(commands.Cog):
 
             need = 1 if self.mode == 1 else (2 if self.mode == 2 else 3)
             if len(self.guesses) < need:
-                # 다음 선택 유도
-                nth = ["첫", "두", "세"][len(self.guesses)] if len(self.guesses) < 3 else f"{len(self.guesses)+1}"
+                nth_names = ["첫", "두", "세"]
+                nth = nth_names[len(self.guesses)] if len(self.guesses) < 3 else f"{len(self.guesses)+1}"
                 await interaction.response.edit_message(
-                    embed=self._progress_embed(interaction, prompt=f"{nth}번쨰 로 나올 눈을 선택하세요."),
+                    embed=self._progress_embed(interaction, prompt=f"{nth}번째로 나올 눈을 선택하세요."),
                     view=self
                 )
                 return
@@ -303,11 +444,14 @@ class MinigamesCog(commands.Cog):
                     color = discord.Color.red()
             elif self.mode == 2:
                 if success_count == 0:
-                    # 추가 차감해서 총 -10 되도록
-                    extra = DICE2_FAIL_TOTAL_LOSS - DICE2_ENTRY_COST  # 5
-                    spend_points(user_id, extra)
+                    extra = DICE2_FAIL_TOTAL_LOSS - DICE2_ENTRY_COST  # 0
+                    if extra > 0:
+                        spend_points(user_id, extra)
                     new_bal = get_points(user_id)
-                    reward_text = f"둘 다 틀렸어요. 추가 **-{extra} {CURRENCY}** (총 -{DICE2_FAIL_TOTAL_LOSS})"
+                    if extra > 0:
+                        reward_text = f"둘 다 틀렸어요. 추가 **-{extra} {CURRENCY}** (총 -{DICE2_FAIL_TOTAL_LOSS})"
+                    else:
+                        reward_text = f"둘 다 틀렸어요. 총 **-{DICE2_FAIL_TOTAL_LOSS} {CURRENCY}** (추가 차감 없음)"
                     color = discord.Color.red()
                 elif success_count == 1:
                     new_bal = add_points(user_id, DICE2_REWARD_ANY)
@@ -319,14 +463,19 @@ class MinigamesCog(commands.Cog):
                     color = discord.Color.green()
             else:  # mode == 3
                 if success_count == 0:
-                    extra = DICE3_FAIL_TOTAL_LOSS - DICE3_ENTRY_COST  # 25
-                    spend_points(user_id, extra)
+                    extra = DICE3_FAIL_TOTAL_LOSS - DICE3_ENTRY_COST  # 900
+                    if extra > 0:
+                        spend_points(user_id, extra)
                     new_bal = get_points(user_id)
                     reward_text = f"모두 틀렸어요. 추가 **-{extra} {CURRENCY}** (총 -{DICE3_FAIL_TOTAL_LOSS})"
                     color = discord.Color.red()
                 elif success_count == 1:
-                    new_bal = add_points(user_id, DICE3_REWARD_1)
-                    reward_text = f"1개 성공! **+{DICE3_REWARD_1} {CURRENCY}**"
+                    if DICE3_REWARD_1 > 0:
+                        new_bal = add_points(user_id, DICE3_REWARD_1)
+                        reward_text = f"1개 성공! **+{DICE3_REWARD_1} {CURRENCY}**"
+                    else:
+                        new_bal = get_points(user_id)
+                        reward_text = f"1개 성공! 보상 없음 (**+0 {CURRENCY}**)"
                     color = discord.Color.green()
                 elif success_count == 2:
                     new_bal = add_points(user_id, DICE3_REWARD_2)
@@ -369,7 +518,6 @@ class MinigamesCog(commands.Cog):
             if not isinstance(view, MinigamesCog.DiceView):
                 await interaction.response.defer()
                 return
-            # 권한 체크는 View.interaction_check에서 이미 처리
             val = int(self.label)
             await view.handle_guess(interaction, face_value=val)
 
