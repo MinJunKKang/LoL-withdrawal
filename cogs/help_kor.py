@@ -51,7 +51,9 @@ class HelpKorCog(commands.Cog):
             value=(
                 f"• **{PREFIX}지갑 [@유저]** — 포인트 보유량 확인\n"
                 f"• **{PREFIX}출석** — 하루 1회, KST 자정 초기화, 보상 **30 {CURRENCY}**\n"
-                f"• **{PREFIX}도박 n** — 1≤n≤50, **성공 1/2**, 당첨 시 2배 지급, 유저별 쿨타임 **3분**\n"
+                f"• **{PREFIX}전달 @유저 금액** — @유저에게 자신의 포인트를 전달\n"
+                f"• **{PREFIX}도박 n** — n ≥ 1 (상한 없음), **성공 1/2**, 당첨 시 2배 지급, 유저별 쿨타임 **3분**\n"
+                f"   (💡 베팅이 **진행되면** 쿨타임이 시작됩니다)"
             ),
             inline=False,
         )
@@ -102,7 +104,7 @@ class HelpKorCog(commands.Cog):
         embed.set_footer(text="운영진용 명령은 **.도움 관리자** 를 참고하세요.")
         return embed
 
-        # 관리자 임베드
+    # 관리자 임베드
     def _build_admin_embed(self) -> discord.Embed:
         shop_channel = _get_purchase_channel_mention()
         shop_place = shop_channel or "지정 채널"
@@ -141,7 +143,8 @@ class HelpKorCog(commands.Cog):
                 f"  - **{PREFIX}내전 교체 @내보낼사람 @투입할사람** — 스왑/대기열 투입/미배정 투입 지원\n"
                 f"  - **{PREFIX}내전 팀장 <1|2> @유저** — 해당 팀의 팀장 변경\n"
                 f"• **관리 패널(에페메랄)** — 로비/팀 현황 메시지의 **관리** 버튼으로 진입\n"
-                f"  - 기능: **대기열 승격(1명)**, **팀장 변경**, **멤버 제외**, **멤버 교체**, **닫기**"
+                f"  - 기능: **대기열 승격(1명)**, **팀장 변경**, **멤버 제외**, **멤버 교체**, **닫기**\n"
+                f"• **드래프트 중 팀원 선택**은 **팀장 외에도 개최자/관리자**가 수행할 수 있습니다."
             ),
             inline=False,
         )
