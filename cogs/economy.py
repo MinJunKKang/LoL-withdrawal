@@ -15,8 +15,7 @@ from utils.stats import (
 # Constants
 # ─────────────────────────────────────────────────────────
 CURRENCY = "Point"
-COOLDOWN_MINUTES = 3          # 도박 쿨타임: 3분
-MAX_BET = 50
+COOLDOWN_MINUTES = 3          # 도박 쿨타임: 3분 (유지)
 SUCCESS_PROB = 0.5            # 1/2 확률
 
 DAILY_REWARD = 30             # 출석 보상
@@ -38,9 +37,10 @@ class EconomyCog(commands.Cog):
     .지급 @유저1 [@유저2 ...] 금액
     .회수 @유저 양:n
     .지갑 [@유저]
-    .출석                     (KST 자정 초기화, 1일 1회, 보상 30P)
-    .도박 n                   (1 ≤ n ≤ 50, 성공 1/2, 당첨 시 2배, 유저별 쿨타임 3분, 베팅 성공시에만 쿨 시작)
-    .도박 초기화 @유저         (관리자 전용, 해당 유저의 도박 쿨타임 초기화)
+    .출석
+    .전달 @유저 n             (@유저에게 자신의 포인트 중 n 포인트를 송금)
+    .도박 n                   (성공 1/2, 2배 지급, 유저별 쿨타임 3분, **금액 제한 없음**)
+    .도박 초기화 @유저         (관리자) 해당 유저의 도박 쿨타임 초기화
     """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -80,14 +80,12 @@ class EconomyCog(commands.Cog):
         now_kst = datetime.now(tz=KST)
         today_str = now_kst.date().isoformat()          # 'YYYY-MM-DD'
         next_reset = (now_kst + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # 만약 지금이 이미 00:00 이후라면 위 계산으로 다음날 00:00이 됨
 
         stats = load_stats()
         rec = ensure_user(stats, user_id)
         last_attend_str = rec.get(ATTEND_KEY)
 
         if last_attend_str == today_str:
-            # 이미 오늘 출석 완료
             ts = next_reset.strftime("%Y-%m-%d %H:%M KST")
             embed = discord.Embed(
                 title="📅 출석 체크",
@@ -113,6 +111,41 @@ class EconomyCog(commands.Cog):
                 f"현재 보유: **{format_num(current)} {CURRENCY}**"
             ),
             color=discord.Color.green()
+        )
+        await ctx.send(embed=embed)
+
+    # --------- 전달(사용자 간 포인트 송금) ---------
+    @commands.command(name="전달")
+    async def transfer_points(self, ctx: commands.Context, member: discord.Member, amount: str):
+        """
+        사용법: .전달 @유저 n
+        - 자신의 포인트 중 n 포인트를 대상 유저에게 전달(송금)합니다.
+        """
+        if member.id == ctx.author.id:
+            await ctx.reply("자기 자신에게는 전달할 수 없어요.")
+            return
+        if member.bot:
+            await ctx.reply("봇에게는 전달할 수 없어요.")
+            return
+
+        parsed = self._parse_amount(amount)
+        if parsed is None or parsed <= 0:
+            await ctx.reply("전달 금액을 올바르게 입력해 주세요. 예) `.전달 @유저 500` 또는 `.전달 @유저 양:500`")
+            return
+
+        if not spend_points(ctx.author.id, parsed):
+            await ctx.reply(f"잔액이 부족합니다. (보유: {format_num(get_points(ctx.author.id))} {CURRENCY})")
+            return
+
+        new_receiver_bal = add_points(member.id, parsed)
+
+        embed = discord.Embed(
+            title="💸 포인트 전달 완료",
+            description=(f"보내는 사람: {ctx.author.mention}\n"
+                         f"받는 사람: {member.mention}\n"
+                         f"전달 금액: **{format_num(parsed)} {CURRENCY}**\n\n"
+                         f"받는 사람 현재 보유: **{format_num(new_receiver_bal)} {CURRENCY}**"),
+            color=discord.Color.blurple()
         )
         await ctx.send(embed=embed)
 
@@ -215,20 +248,21 @@ class EconomyCog(commands.Cog):
     @commands.group(name="도박", invoke_without_command=True)
     async def gamble(self, ctx: commands.Context, amount: int):
         """
-        사용법: .도박 n   (1 ≤ n ≤ 50)
-        - 성공: 확률 1/2, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
+        사용법: .도박 n
+        - 성공: 1/2 확률, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
         - 실패: 베팅액 회수
-        - 쿨타임: 유저별 3분 (베팅이 실제로 진행된 경우에만 시작)
+        - 유저별 쿨타임: 3분
+        - **금액 제한 없음**
         """
-        # 입력 검증 (쿨타임 시작 안 함)
-        if amount <= 0 or amount > MAX_BET:
-            await ctx.reply(f"베팅 금액은 1 ~ {MAX_BET} 사이여야 합니다.")
+        # 입력 검증 (상한 없음)
+        if amount <= 0:
+            await ctx.reply("베팅 금액은 1 이상이어야 합니다.")
             return
 
         # 유저별 쿨타임 체크
         now = datetime.now(timezone.utc)
         last = get_last_gamble(ctx.author.id)
-        cooldown = timedelta(minutes=COOLDOWN_MINUTES)   # ✅ 분 단위 쿨타임
+        cooldown = timedelta(minutes=COOLDOWN_MINUTES)
         if last and now - last < cooldown:
             remain = cooldown - (now - last)
             hrs_total = remain.days * 24 + remain.seconds // 3600
@@ -243,12 +277,12 @@ class EconomyCog(commands.Cog):
             await ctx.reply(msg, delete_after=8)
             return
 
-        # 잔액 차감 실패 시 쿨타임 시작하지 않음
+        # 잔액 차감 실패 시 진행 X
         if not spend_points(ctx.author.id, amount):
             await ctx.reply(f"잔액이 부족합니다. (보유: {format_num(get_points(ctx.author.id))} {CURRENCY})")
             return
 
-        # 베팅이 진행된 시점에 쿨타임 기록
+        # 베팅 진행 시점에 쿨타임 기록
         set_last_gamble(ctx.author.id, now)
 
         win = random.random() < SUCCESS_PROB  # 1/2
@@ -279,7 +313,6 @@ class EconomyCog(commands.Cog):
         해당 유저의 도박 쿨타임(최근 베팅 시각)을 제거합니다.
         """
         last = get_last_gamble(member.id)
-        # set_last_gamble(..., None) 은 utils.stats 에서 키 제거/None 처리
         set_last_gamble(member.id, None)
 
         if last:
