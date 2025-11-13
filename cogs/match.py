@@ -540,8 +540,11 @@ class MatchCog(commands.Cog):
                 ]
             )
             async def select_callback(self, interaction: discord.Interaction, select: Select):
-                if interaction.user.id != captain_id:
-                    await interaction.response.send_message("지금은 다른 팀장의 차례입니다.", ephemeral=True)
+                if interaction.user.id != captain_id and not cog._is_host_or_admin(interaction, game):
+                    await interaction.response.send_message(
+                        "지금은 해당 팀의 **팀장 또는 관리자/개최자**만 선택할 수 있습니다.",
+                        ephemeral=True
+                    )
                     return
 
                 uid = int(select.values[0])
