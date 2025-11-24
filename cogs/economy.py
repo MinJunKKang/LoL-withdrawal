@@ -325,40 +325,31 @@ class EconomyCog(commands.Cog):
         if isinstance(error, commands.MissingPermissions):
             await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
 
-    # --------- 전 서버 인원 포인트 초기화(관리권한 필요) ---------
-    @commands.has_guild_permissions(manage_guild=True)
-    @commands.command(name="초기화", aliases=["@초기화", "포인트초기화"])
+    # ───────── 전원 포인트 초기화 (.초기화) — 허용된 ID만 ─────────
+    @commands.command(name="초기화")
     async def reset_all_points(self, ctx: commands.Context):
         """
-        사용법: .초기화  (또는 .@초기화)
-        - 현재 서버(길드)에 속한 '사람' 유저 전원의 포인트를 0으로 초기화합니다. (봇 계정 제외)
-        - 다른 서버 유저 기록에는 영향 주지 않습니다.
+        사용법: .초기화
+        - .env의 ECONOMY_RESET_ALLOW에 포함된 사용자만 실행 가능
+        - 모든 유저의 포인트를 0으로 초기화
         """
+        if ctx.author.id not in RESET_ALLOWED_IDS:
+            await ctx.reply("이 명령은 사용할 수 없습니다. (권한 없음)", delete_after=6)
+            return
+
         stats = load_stats()
-
-        # 현재 길드의 사람 유저 id만 대상으로(봇 제외)
-        guild_user_ids = {str(m.id) for m in ctx.guild.members if not m.bot}
-
-        affected = 0
-        for uid, rec in stats.items():
-            if uid in guild_user_ids and isinstance(rec, dict) and "포인트" in rec:
-                try:
-                    rec["포인트"] = 0
-                    affected += 1
-                except Exception:
-                    pass
-
+        count = 0
+        for uid, rec in list(stats.items()):
+            if isinstance(rec, dict):
+                # 포인트 키가 없을 수도 있으니 안전하게 0으로 세팅
+                rec["포인트"] = 0
+                count += 1
         save_stats(stats)
 
         embed = discord.Embed(
-            title="🧹 전원 포인트 초기화",
-            description=(f"현재 서버의 유저 **{affected}명**의 포인트를 **0 {CURRENCY}**로 초기화했습니다."),
+            title="🧹 포인트 초기화 완료",
+            description=f"총 **{count}명**의 포인트를 **0 {CURRENCY}**로 초기화했습니다.",
             color=discord.Color.red()
         )
-        embed.set_footer(text=f"실행: {ctx.author.display_name}")
+        embed.set_footer(text=f"요청자: {ctx.author.display_name}")
         await ctx.send(embed=embed)
-
-    @reset_all_points.error
-    async def _reset_all_points_error(self, ctx: commands.Context, error: Exception):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
