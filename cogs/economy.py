@@ -4,6 +4,23 @@ from datetime import datetime, timezone, timedelta, date
 import discord
 from discord.ext import commands
 from typing import Optional
+import configparser
+import os
+
+# ─────────────────────────────────────────────
+# config.ini에서 reset_allow 읽기
+# ─────────────────────────────────────────────
+_cfg = configparser.ConfigParser()
+_cfg.read("config.ini", encoding="utf-8")
+
+raw_ids = _cfg.get("Economy", "reset_allow", fallback="")
+
+RESET_ALLOWED_IDS = set()
+for token in raw_ids.replace("\n", ",").split(","):
+    token = token.strip()
+    if token.isdigit():
+        RESET_ALLOWED_IDS.add(int(token))
+
 
 from utils.stats import (
     load_stats, save_stats, ensure_user, format_num,
@@ -325,12 +342,11 @@ class EconomyCog(commands.Cog):
         if isinstance(error, commands.MissingPermissions):
             await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
 
-    # ───────── 전원 포인트 초기화 (.초기화) — 허용된 ID만 ─────────
     @commands.command(name="초기화")
     async def reset_all_points(self, ctx: commands.Context):
         """
         사용법: .초기화
-        - .env의 ECONOMY_RESET_ALLOW에 포함된 사용자만 실행 가능
+        - config.ini의 [Economy] reset_allow 항목에 포함된 ID만 실행 가능
         - 모든 유저의 포인트를 0으로 초기화
         """
         if ctx.author.id not in RESET_ALLOWED_IDS:
@@ -341,7 +357,6 @@ class EconomyCog(commands.Cog):
         count = 0
         for uid, rec in list(stats.items()):
             if isinstance(rec, dict):
-                # 포인트 키가 없을 수도 있으니 안전하게 0으로 세팅
                 rec["포인트"] = 0
                 count += 1
         save_stats(stats)
@@ -349,7 +364,8 @@ class EconomyCog(commands.Cog):
         embed = discord.Embed(
             title="🧹 포인트 초기화 완료",
             description=f"총 **{count}명**의 포인트를 **0 {CURRENCY}**로 초기화했습니다.",
-            color=discord.Color.red()
+            color=discord.Color.red(),
         )
         embed.set_footer(text=f"요청자: {ctx.author.display_name}")
         await ctx.send(embed=embed)
+
