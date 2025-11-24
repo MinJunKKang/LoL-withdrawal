@@ -135,6 +135,8 @@ class HelpKorCog(commands.Cog):
             inline=False,
         )
 
+        
+
         # Match (admin)
         embed.add_field(
             name="⚔️ 내전(match) — 관리자",
@@ -159,8 +161,22 @@ class HelpKorCog(commands.Cog):
             inline=False,
         )
 
+        # Economy (admin)
+        embed.add_field(
+            name="💰 경제(포인트) — 관리자",
+            value=(
+                f"• **{PREFIX}지급 @유저1 [@유저2 ...] 금액** — 여러 명/한 명 일괄 지급 (예: `{PREFIX}지급 @A @B 5000`)\n"
+                f"• **{PREFIX}회수 @유저 양:n** — 포인트 회수\n"
+                f"• **{PREFIX}도박 초기화 @유저** — 해당 유저 도박 쿨타임 초기화\n"
+                f"• **{PREFIX}초기화** (별칭: **{PREFIX}@초기화**, **{PREFIX}포인트초기화**) — 현재 서버 유저 전원 포인트를 **0 {CURRENCY}**로 초기화"
+            ),
+            inline=False,
+        )
+
+
         embed.set_footer(text="일반 사용자 명령은 **.도움** 을 참고하세요.")
         return embed
+    
 
     # -----------------------
     # 공개 명령: .도움 / .도움 관리자
