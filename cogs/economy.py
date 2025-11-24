@@ -33,7 +33,7 @@ from utils.stats import (
 # ─────────────────────────────────────────────────────────
 CURRENCY = "Point"
 COOLDOWN_MINUTES = 3          # 도박 쿨타임: 3분 (유지)
-SUCCESS_PROB = 0.5            # 1/2 확률
+SUCCESS_PROB = 0.4            # 0.4 확률
 
 DAILY_REWARD = 30             # 출석 보상
 ATTEND_KEY = "출석_최근"        # 유저 레코드에 저장할 키(YYYY-MM-DD)
@@ -56,7 +56,7 @@ class EconomyCog(commands.Cog):
     .지갑 [@유저]
     .출석
     .전달 @유저 n             (@유저에게 자신의 포인트 중 n 포인트를 송금)
-    .도박 n                   (성공 1/2, 2배 지급, 유저별 쿨타임 3분, **금액 제한 없음**)
+    .도박 n                   (성공 0.4, 2배 지급, 유저별 쿨타임 3분, **금액 제한 없음**)
     .도박 초기화 @유저         (관리자) 해당 유저의 도박 쿨타임 초기화
     """
     def __init__(self, bot: commands.Bot):
@@ -266,7 +266,7 @@ class EconomyCog(commands.Cog):
     async def gamble(self, ctx: commands.Context, amount: int):
         """
         사용법: .도박 n
-        - 성공: 1/2 확률, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
+        - 성공: 0.4 확률, 2배 지급(베팅액 선차감 → 당첨 시 2n 지급, 순이익 +n)
         - 실패: 베팅액 회수
         - 유저별 쿨타임: 3분
         - **금액 제한 없음**
@@ -302,7 +302,7 @@ class EconomyCog(commands.Cog):
         # 베팅 진행 시점에 쿨타임 기록
         set_last_gamble(ctx.author.id, now)
 
-        win = random.random() < SUCCESS_PROB  # 1/2
+        win = random.random() < SUCCESS_PROB  # 0.4
         if win:
             # 총 2n 지급 → 직전에 n 차감했으므로 순이익 +n
             new_balance = add_points(ctx.author.id, amount * 2)
