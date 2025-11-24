@@ -1118,7 +1118,7 @@ class MatchCog(commands.Cog):
                 update_result_dual(str(uid), False)
                 add_points(uid, LOSE_REWARD)
 
-            self._lock_buttons()
+            self._lock_result_buttons_only()  # ← 승/패/취소만 비활성, 다음판/종료는 유지
             embed = interaction.message.embeds[0]
             embed.add_field(name="결과", value="✅ 1팀 승리!", inline=False)
             embed.add_field(
@@ -1148,7 +1148,7 @@ class MatchCog(commands.Cog):
                 update_result_dual(str(uid), True)
                 add_points(uid, WIN_REWARD)
 
-            self._lock_buttons()
+            self._lock_result_buttons_only()
             embed = interaction.message.embeds[0]
             embed.add_field(name="결과", value="✅ 2팀 승리!", inline=False)
             embed.add_field(
@@ -1167,12 +1167,12 @@ class MatchCog(commands.Cog):
                 await interaction.response.send_message("이미 결과가 기록되었습니다.", ephemeral=True)
                 return
 
-            self._lock_buttons()
+            self._lock_result_buttons_only()
             embed = interaction.message.embeds[0]
             embed.add_field(name="결과", value="❌ 게임이 취소되었습니다.", inline=False)
             await interaction.response.edit_message(embed=embed, view=self)
 
-        @discord.ui.button(label="다음판 (같은 인원)", style=discord.ButtonStyle.success)  # ✨ 리매치 추가
+        @discord.ui.button(label="다음판 (같은 인원)", style=discord.ButtonStyle.success)
         async def rematch(self, interaction: discord.Interaction, button: Button):
             if not self.cog._is_host_or_admin(interaction, self.game):
                 await interaction.response.send_message("개최자 또는 관리자만 사용할 수 있습니다.", ephemeral=True)
@@ -1186,12 +1186,11 @@ class MatchCog(commands.Cog):
             self.cog.games.pop(self.game.id, None)
             self.cog.active_hosts.discard(self.game.host_id)
 
-            # 새 게임 생성(같은 인원 유지, 슬롯은 1..N 순서로 재배정)
+            # 새 게임 생성(같은 인원 유지)
             new_id = self.cog.game_counter
             self.cog.game_counter += 1
 
             new_game = Game(new_id, self.game.host_id, self.game.channel_id)
-            # 같은 인원 재배치
             for uid in self.game.participants:
                 free = new_game.first_free_slot()
                 if free is not None:
@@ -1206,7 +1205,32 @@ class MatchCog(commands.Cog):
             new_game.message = message
             await interaction.response.send_message("같은 인원으로 다음 판을 시작합니다. 팀장 선택부터 진행하세요.", ephemeral=True)
 
-        def _lock_buttons(self):
-            self.game.finished = True
+        @discord.ui.button(label="종료", style=discord.ButtonStyle.secondary)
+        async def end_series(self, interaction: discord.Interaction, button: Button):
+            """내전 전체 종료(리매치도 못 하게 완전 정리)"""
+            if not self.cog._is_host_or_admin(interaction, self.game):
+                await interaction.response.send_message("개최자 또는 관리자만 종료할 수 있습니다.", ephemeral=True)
+                return
+
+            # 게임 정리
+            self.cog.active_hosts.discard(self.game.host_id)
+            self.cog.channel_to_game.pop(self.game.channel_id, None)
+            self.cog.games.pop(self.game.id, None)
+
+            # 모든 버튼 잠금
             for child in self.children:
                 child.disabled = True
+
+            embed = interaction.message.embeds[0]
+            embed.title = f"⚔️ 내전 #{self.game.id} — 종료됨"
+            embed.add_field(name="상태", value="🏁 내전이 종료되었습니다.", inline=False)
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        # --- 헬퍼: 승/패/취소만 비활성화, 다음판/종료는 살려둠 ---
+        def _lock_result_buttons_only(self):
+            self.game.finished = True
+            for child in self.children:
+                if isinstance(child, Button) and child.label in ("다음판 (같은 인원)", "종료"):
+                    child.disabled = False
+                else:
+                    child.disabled = True
