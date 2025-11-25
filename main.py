@@ -7,7 +7,7 @@ from discord.ext import commands
 from cogs.match import MatchCog
 from cogs.economy import EconomyCog
 from cogs.stats_view import StatsCog
-from cogs.role_shop import RoleShopCog
+from cogs.shop import ShopCog
 from cogs.minigames import MinigamesCog
 
 config = configparser.ConfigParser()
@@ -34,7 +34,7 @@ async def setup_hook():
     await bot.add_cog(MatchCog(bot, role_ids=ROLE_IDS))
     await bot.add_cog(EconomyCog(bot))
     await bot.add_cog(StatsCog(bot))
-    await bot.add_cog(RoleShopCog(bot))
+    await bot.add_cog(ShopCog(bot))
     await bot.add_cog(MinigamesCog(bot))
     await bot.load_extension("cogs.help_kor")
 
