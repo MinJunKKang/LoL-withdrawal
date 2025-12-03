@@ -1,6 +1,7 @@
 # cogs/economy.py
 import random
 from datetime import datetime, timezone, timedelta, date
+import math
 import discord
 from discord.ext import commands
 from typing import Optional
@@ -12,6 +13,131 @@ import configparser
 _cfg = configparser.ConfigParser()
 _cfg.read("config.ini", encoding="utf-8")
 
+# ─────────────────────────────────────────────────────────
+# 순위 임베드/페이지네이션 헬퍼
+# ─────────────────────────────────────────────────────────
+def build_ranking_embed(
+    guild: discord.Guild,
+    ranking_list: list[tuple[int, int]],
+    page: int,
+    page_size: int = 10,
+) -> discord.Embed:
+    """페이지 단위로 순위 임베드 생성"""
+    total_users = len(ranking_list)
+    if total_users == 0 or guild is None:
+        embed = discord.Embed(
+            title="🏆 서버 포인트 랭킹",
+            description="순위 정보가 없습니다.",
+            color=discord.Color.blue(),
+        )
+        return embed
+
+    max_page = max(1, math.ceil(total_users / page_size))
+    page = max(1, min(page, max_page))
+
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    slice_ = ranking_list[start_index:end_index]
+
+    lines: list[str] = []
+    for rank, (uid, point) in enumerate(slice_, start=start_index + 1):
+        member = guild.get_member(uid)
+        if member is None:
+            continue
+        # 예: 1. 닉네임 — 4,726 Point
+        lines.append(
+            f"{rank}. {member.display_name} — **{format_num(point)} {CURRENCY}**"
+        )
+
+    if not lines:
+        lines.append("표시할 순위가 없습니다.")
+
+    embed = discord.Embed(
+        title="🏆 서버 포인트 랭킹",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text=f"페이지 {page} / {max_page} · 페이지당 {page_size}명")
+    return embed
+
+
+class RankingView(discord.ui.View):
+    """순위 페이지를 버튼으로 넘기는 View"""
+
+    def __init__(
+        self,
+        ctx: commands.Context,
+        ranking_list: list[tuple[int, int]],
+        page_size: int = 10,
+        timeout: float = 120.0,
+    ):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.guild = ctx.guild
+        self.ranking_list = ranking_list
+        self.page_size = page_size
+        self.current_page = 1
+        self.max_page = max(
+            1, math.ceil(len(self.ranking_list) / self.page_size)
+        )
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """명령어 사용한 사람만 버튼을 누를 수 있게 제한"""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "이 순위 창은 명령을 사용한 사람만 조작할 수 있어요.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _update(self, interaction: discord.Interaction):
+        embed = build_ranking_embed(
+            self.guild, self.ranking_list, self.current_page, self.page_size
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary)
+    async def first_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.current_page = 1
+        await self._update(interaction)
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def prev_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if self.current_page > 1:
+            self.current_page -= 1
+        await self._update(interaction)
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if self.current_page < self.max_page:
+            self.current_page += 1
+        await self._update(interaction)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def last_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.current_page = self.max_page
+        await self._update(interaction)
+
+    async def on_timeout(self) -> None:
+        """타임아웃 후 버튼 비활성화"""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
 def _parse_id_list(raw: str) -> set[int]:
     ids: set[int] = set()
@@ -314,42 +440,121 @@ class EconomyCog(commands.Cog):
                 "대상 유저 멘션 뒤에 **금액**을 입력하세요. 예) `.지급 @사용자1 5000`",
                 delete_after=6,
             )
-
-    # ───────────────── 회수 (관리자) ─────────────────
+    
+    # ───────────────── 회수 (관리자, 여러 명 일괄) ─────────────────
     @commands.has_guild_permissions(manage_guild=True)
     @commands.command(name="회수")
     async def revoke_points(
-        self, ctx: commands.Context, member: discord.Member, amount: str
+        self,
+        ctx: commands.Context,
+        members: commands.Greedy[discord.Member],
+        *,
+        amount: str,
     ):
+        """
+        사용법:
+          .회수 @유저1 5000
+          .회수 @유저1 @유저2 ... 5000
+          .회수 @유저1 @유저2 ... 양:5000
+        - 멘션된 모든 유저에게서 동일 금액 회수
+        """
+        if not members:
+            await ctx.reply(
+                "회수할 **유저를 1명 이상 멘션**해 주세요. 예) "
+                "`.회수 @사용자1 5000` 또는 `.회수 @사용자1 @사용자2 5000`"
+            )
+            return
+
         parsed = self._parse_amount(amount)
         if parsed is None or parsed <= 0:
             await ctx.reply(
-                "금액 형식이 올바르지 않아요. 예: `.회수 @유저 5000` 또는 `.회수 @유저 양:5000`"
+                "금액 형식이 올바르지 않아요. 예: "
+                "`.회수 @유저1 5000` 또는 `.회수 @유저1 @유저2 양:5000`"
             )
             return
 
-        if not spend_points(member.id, parsed):
-            await ctx.send(
-                f"❌ {member.mention} 님의 잔액이 부족합니다. (요청: {format_num(parsed)} {CURRENCY})"
+        # 중복 멘션 제거
+        unique_members: list[discord.Member] = []
+        seen_ids: set[int] = set()
+        for m in members:
+            if m.id not in seen_ids:
+                unique_members.append(m)
+                seen_ids.add(m.id)
+
+        # 먼저 잔액 체크 (누가 부족하면 전체 회수 중단)
+        insufficient = [
+            m for m in unique_members if get_points(m.id) < parsed
+        ]
+        if insufficient:
+            names = ", ".join(m.mention for m in insufficient[:5])
+            more = len(insufficient) - 5
+            if more > 0:
+                names += f" 외 {more}명"
+            await ctx.reply(
+                f"❌ 다음 유저의 잔액이 부족하여 회수를 진행하지 않았습니다:\n{names}"
             )
             return
 
-        current = get_points(member.id)
+        # 실제 회수 진행 + 새 잔액 기록
+        new_balances: dict[int, int] = {}
+        for m in unique_members:
+            ok = spend_points(m.id, parsed)
+            if not ok:
+                # 이론상 여기 안 와야 함(위에서 잔액 체크함), 혹시 몰라 방어 코드
+                continue
+            new_balances[m.id] = get_points(m.id)
+
+        # 결과 메시지 (현재 채널)
+        mentions = ", ".join(m.mention for m in unique_members[:10])
+        more = len(unique_members) - 10
+        if more > 0:
+            mentions += f" 외 {more}명"
+
+        total = parsed * len(unique_members)
         embed = discord.Embed(
             title="포인트 회수 완료",
             description=(
-                f"{member.mention} 님에게서 **{format_num(parsed)} {CURRENCY}** 회수했습니다.\n"
-                f"현재 보유: **{format_num(current)} {CURRENCY}**"
+                f"대상: {mentions}\n"
+                f"회수 금액(1인당): **{format_num(parsed)} {CURRENCY}**\n"
+                f"총 회수: **{format_num(total)} {CURRENCY}**"
             ),
             color=discord.Color.red(),
         )
         embed.set_footer(text=f"회수자: {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
+        # 포인트 회수 로그 채널로 로그 전송 (지급과 동일한 형식)
+        log_ch = self._get_point_log_channel(ctx.guild)
+        if log_ch:
+            for m in unique_members:
+                bal = new_balances.get(m.id, get_points(m.id))
+                log_embed = discord.Embed(
+                    title="💸 회수 로그",
+                    color=discord.Color.dark_red(),
+                )
+                log_embed.add_field(name="회수자", value=ctx.author.mention, inline=False)
+                log_embed.add_field(name="대상", value=m.mention, inline=False)
+                log_embed.add_field(
+                    name="금액", value=f"{format_num(parsed)} P", inline=False
+                )
+                log_embed.add_field(
+                    name="채널", value=ctx.channel.mention, inline=False
+                )
+                log_embed.add_field(
+                    name="대상 잔액", value=f"{format_num(bal)} P", inline=False
+                )
+                await log_ch.send(embed=log_embed)
+
     @revoke_points.error
     async def _revoke_error(self, ctx: commands.Context, error: Exception):
         if isinstance(error, commands.MissingPermissions):
             await ctx.reply("이 명령은 **서버 관리** 권한이 있어야 사용 가능합니다.", delete_after=6)
+        elif isinstance(error, commands.BadArgument):
+            await ctx.reply(
+                "대상 유저 멘션 뒤에 **금액**을 입력하세요. 예) `.회수 @사용자1 5000`",
+                delete_after=6,
+            )
+
 
     # ───────────────── 도박 ─────────────────
     @commands.group(name="도박", invoke_without_command=True)
@@ -432,14 +637,23 @@ class EconomyCog(commands.Cog):
 
     # ───────────────── 순위 조회 (.순위) ─────────────────
     @commands.command(name="순위")
-    async def ranking(self, ctx: commands.Context, member: discord.Member | None = None):
+    async def ranking(
+        self, ctx: commands.Context, member: discord.Member | None = None
+    ):
         """
         사용법:
-          .순위         → 포인트 기준 상위 10명
-          .순위 @유저   → 멘션한 유저의 전체 순위 확인
+          .순위           → 버튼으로 넘기는 전체 랭킹 (페이지당 10명)
+          .순위 @유저     → 해당 유저의 개인 순위 조회
+
+        - 서버에 실제 존재하는 멤버만 집계
+        - 서버를 나간 '알 수 없음' 유저는 자동 제외
         """
         stats = load_stats()
         guild = ctx.guild
+
+        if guild is None:
+            await ctx.reply("이 명령은 서버 채널에서만 사용할 수 있습니다.")
+            return
 
         ranking_list: list[tuple[int, int]] = []
 
@@ -451,7 +665,7 @@ class EconomyCog(commands.Cog):
             uid_int = int(uid)
 
             # 서버에 실제 존재하는 멤버만 포함
-            user = guild.get_member(uid_int) if guild else None
+            user = guild.get_member(uid_int)
             if user is None:
                 continue
 
@@ -459,14 +673,19 @@ class EconomyCog(commands.Cog):
                 point = int(rec.get("포인트", 0))
                 ranking_list.append((uid_int, point))
 
+        # 포인트 기준 내림차순 정렬
         ranking_list.sort(key=lambda x: x[1], reverse=True)
 
-        # 개별 유저 조회
-        if member:
+        if not ranking_list:
+            await ctx.reply("순위 정보가 없습니다.")
+            return
+
+        # ───── 멘션이 있으면: 개인 순위 조회 유지 ─────
+        if member is not None:
             target_id = member.id
             total_users = len(ranking_list)
 
-            user_rank = None
+            user_rank: int | None = None
             user_points = 0
 
             for idx, (uid, p) in enumerate(ranking_list, start=1):
@@ -493,27 +712,11 @@ class EconomyCog(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        # 상위 10명 출력
-        top10 = ranking_list[:10]
-        description_lines: list[str] = []
-
-        for i, (uid, point) in enumerate(top10, start=1):
-            user = guild.get_member(uid) if guild else None
-            if user is None:
-                continue
-            description_lines.append(
-                f"**{i}위 — {user.display_name}** : {format_num(point)} {CURRENCY}"
-            )
-
-        if not description_lines:
-            description_lines.append("아직 순위에 포함될 유저가 없습니다.")
-
-        embed = discord.Embed(
-            title="🏆 포인트 상위 10위 (서버 내 실제 사용자를 기준으로)",
-            description="\n".join(description_lines),
-            color=discord.Color.blue(),
-        )
-        await ctx.send(embed=embed)
+        # ───── 멘션이 없으면: 버튼 페이지 랭킹 ─────
+        view = RankingView(ctx, ranking_list, page_size=10, timeout=180.0)
+        first_embed = build_ranking_embed(guild, ranking_list, page=1, page_size=10)
+        msg = await ctx.send(embed=first_embed, view=view)
+        view.message = msg
 
     # ───────────────── 전체 포인트 초기화 (.초기화) ─────────────────
     @commands.command(name="초기화", aliases=["@초기화", "포인트초기화"])
