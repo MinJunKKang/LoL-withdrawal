@@ -9,6 +9,7 @@ from cogs.economy import EconomyCog
 from cogs.stats_view import StatsCog
 from cogs.shop import ShopCog
 from cogs.minigames import MinigamesCog
+from cogs.moderation import ModerationCog
 
 config = configparser.ConfigParser()
 config.read("config.ini", encoding="utf-8")
@@ -36,6 +37,7 @@ async def setup_hook():
     await bot.add_cog(StatsCog(bot))
     await bot.add_cog(ShopCog(bot))
     await bot.add_cog(MinigamesCog(bot))
+    await bot.add_cog(ModerationCog(bot))
     await bot.load_extension("cogs.help_kor")
 
 bot.setup_hook = setup_hook

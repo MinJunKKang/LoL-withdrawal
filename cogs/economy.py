@@ -186,7 +186,7 @@ CURRENCY = "Point"
 COOLDOWN_MINUTES = 3          # 도박 쿨타임: 3분
 SUCCESS_PROB = 0.4            # 0.4 확률
 
-DAILY_REWARD = 30             # 출석 보상
+DAILY_REWARD = 300             # 출석 보상
 ATTEND_KEY = "출석_최근"        # 유저 레코드에 저장할 키(YYYY-MM-DD)
 
 # ─────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ class EconomyCog(commands.Cog):
         """
         사용법: .출석
         - Asia/Seoul 기준 하루 1회, 자정 이후 초기화
-        - 보상: 30 Point
+        - 보상: 300 Point
         """
         user_id = str(ctx.author.id)
         now_kst = datetime.now(tz=KST)

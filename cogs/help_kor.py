@@ -50,7 +50,7 @@ class HelpKorCog(commands.Cog):
             name="💰 경제(포인트) — 사용자",
             value=(
                 f"• **{PREFIX}지갑 [@유저]** — 포인트 보유량 확인\n"
-                f"• **{PREFIX}출석** — 하루 1회, KST 자정 초기화, 보상 **30 {CURRENCY}**\n"
+                f"• **{PREFIX}출석** — 하루 1회, KST 자정 초기화, 보상 **300 {CURRENCY}**\n"
                 f"• **{PREFIX}전달 @유저 금액** — @유저에게 자신의 포인트를 전달\n"
                 f"• **{PREFIX}도박 n** — n ≥ 1 (상한 없음), 당첨 시 2배 지급, 유저별 쿨타임 **3분**\n"
                 f"   (💡 베팅이 **진행되면** 쿨타임이 시작됩니다)\n"
@@ -187,6 +187,18 @@ class HelpKorCog(commands.Cog):
         )
 
         embed.set_footer(text="일반 사용자 명령은 **.도움** 을 참고하세요.")
+    
+        # Economy (admin) 아래나 별도 섹션으로
+        embed.add_field(
+            name="🚫 제재 / 경고 — 관리자",
+            value=(
+                f"• **{PREFIX}경고 @유저 n 사유:...** — 해당 유저에게 경고를 n회 부여하고, "
+                f"제재 기록 로그 채널에 기록합니다. (경고 **4회** 누적 시 자동 서버 차단 시도)\n"
+                f"• **{PREFIX}차감 @유저 n 사유:...** — 해당 유저의 누적 경고를 n회 차감하고, "
+                f"같은 로그 채널에 차감 내역을 기록합니다."
+            ),
+            inline=False,
+        )
         return embed
 
     # -----------------------
