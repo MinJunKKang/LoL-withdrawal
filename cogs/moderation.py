@@ -22,14 +22,9 @@ def _get_id(section: str, key: str) -> int:
     except Exception:
         return 0
 
-
-# 기본 로그 채널 ID (요구사항)
-DEFAULT_WARN_LOG_CHANNEL_ID = 1417536646597054596
-
 # config.ini 에서 [Moderation] warn_log_channel_id 를 읽어오고,
 # 없으면 DEFAULT_WARN_LOG_CHANNEL_ID 사용
-WARN_LOG_CHANNEL_ID = _get_id("Moderation", "warn_log_channel_id") or DEFAULT_WARN_LOG_CHANNEL_ID
-
+WARN_LOG_CHANNEL_ID: int = _get_id("Moderation", "warn_log_channel_id")
 
 class ModerationCog(commands.Cog):
     """
